@@ -128,6 +128,11 @@ export const mcpServers = pgTable("mcp_servers", {
   auth: text("auth").$type<"oauth" | "bearer" | "none">().notNull().default("none"),
   tokenEnc: text("token_enc"),
   tools: integer("tools").notNull().default(0),
+  /** Tool definitions discovered via tools/list (refreshed on check). */
+  toolDefs: jsonb("tool_defs").$type<{ name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: Record<string, unknown> }[]>().notNull().default([]),
+  enabled: boolean("enabled").notNull().default(true),
+  lastError: text("last_error"),
+  lastCheckedAt: ts("last_checked_at"),
   status: text("status").$type<"healthy" | "error">().notNull().default("healthy"),
   createdAt: createdAt(),
 });

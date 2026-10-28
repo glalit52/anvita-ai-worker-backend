@@ -18,6 +18,7 @@ import { serializeApproval, serializeMessage, serializeRun, serializeThread } fr
 import { callModel, type ContentBlock, type MessageParam, type ToolResultParam } from "./model.js";
 import { evaluatePolicies } from "./policy.js";
 import { toolByName, toolsFor } from "./tools/index.js";
+import { mcpToolsFor } from "./tools/mcp.js";
 import type { ToolContext, ToolDef } from "./tools/types.js";
 
 /**
@@ -172,8 +173,8 @@ async function recordStep(run: Run, seq: number, s: { kind: string; name: string
 
 type Outcome = { kind: "result"; result: ToolResultParam } | { kind: "paused"; status: "waiting_auth" | "waiting_approval" };
 
-async function processToolUse(run: Run, state: AgentState, w: MessageWriter, tu: PendingToolUse, log: FastifyBaseLogger): Promise<Outcome> {
-  const tool = toolByName.get(tu.name) as ToolDef | undefined;
+async function processToolUse(run: Run, state: AgentState, w: MessageWriter, tu: PendingToolUse, log: FastifyBaseLogger, registry: Map<string, ToolDef>): Promise<Outcome> {
+  const tool = registry.get(tu.name);
   const err = (content: string): Outcome => ({ kind: "result", result: { type: "tool_result", tool_use_id: tu.id, content, is_error: true } });
   if (!tool) return err(`Unknown tool ${tu.name}`);
 
@@ -351,7 +352,9 @@ async function drive(runId: string, log: FastifyBaseLogger) {
   await setRun(run.id, { status: "running", startedAt: run.startedAt ?? new Date() });
   await setThreadStatus(run, "running");
   const sys = await systemPrompt(run);
-  const tools = toolsFor({ apps: sys.apps });
+  // Static tools for the run's apps plus the workspace's MCP tools (Workers only see their own apps).
+  const tools = [...toolsFor({ apps: sys.apps }), ...(run.workerId ? [] : await mcpToolsFor(run.workspaceId))];
+  const registry = new Map(tools.map((t) => [t.name, t]));
 
   try {
     for (;;) {
@@ -359,7 +362,7 @@ async function drive(runId: string, log: FastifyBaseLogger) {
       if (state.pending) {
         const p = state.pending;
         while (p.index < p.toolUses.length) {
-          const out = await processToolUse(run, state, w, p.toolUses[p.index], log);
+          const out = await processToolUse(run, state, w, p.toolUses[p.index], log, registry);
           if (out.kind === "paused") return park(run, state, w, out.status);
           p.results.push(out.result);
           p.index++;

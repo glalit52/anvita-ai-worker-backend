@@ -118,6 +118,11 @@ async function callScripted(call: ModelCall): Promise<ModelTurn> {
   })();
   const available = new Set(call.tools.map((t) => t.name));
   const reads = KEYWORD_TOOLS.filter(([re, name]) => re.test(text) && available.has(name)).slice(0, 3).map(([, name, input]) => ({ name, input: name === "kb_search" ? { query: text.slice(0, 80) } : input }));
+  // MCP tools: call any whose tool name the user mentions (e.g. "use get_forecast").
+  for (const t of call.tools.filter((x) => x.name.startsWith("mcp_"))) {
+    const raw = t.action.split(".").slice(2).join(".");
+    if (raw && text.toLowerCase().includes(raw.toLowerCase())) reads.push({ name: t.name, input: "query" in (t.inputSchema.properties ?? {}) ? { query: text.slice(0, 120) } : {} });
+  }
   const wantsArtifact = /(pdf|report|deck|summary|sheet|excel|xlsx|csv|chart|graph|dashboard|draft)/i.exec(text);
   const wantsEmail = /\b(email|e-mail|mail it|send it to)\b/i.test(text) && available.has("gmail_send");
   const isTask = reads.length > 0 || !!wantsArtifact || wantsEmail;

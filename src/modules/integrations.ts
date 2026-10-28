@@ -13,6 +13,7 @@ import { resumeRunsWaitingForApp } from "../runtime/agent.js";
 import { connectorFor, oauthConfigured } from "../connectors/index.js";
 import { authorizeUrl, exchangeCode, readState, type ConnectState } from "../connectors/oauth.js";
 import { ConnectorError } from "../connectors/types.js";
+import { listMcpTools } from "../connectors/mcp.js";
 import { apiKeyCredentials, retestConnection, saveConnection } from "../services/connections.js";
 import { can } from "../services/rbac.js";
 import { audit } from "../services/audit.js";
@@ -22,14 +23,6 @@ import { serializeConnection, serializeMcp } from "../services/serializers.js";
 const scope = z.enum(["workspace", "user", "shared"]);
 const credentials = z.record(z.string(), z.string().max(4000)).optional();
 
-async function probe(url: string, token?: string | null): Promise<"healthy" | "error"> {
-  try {
-    const res = await fetch(url, { method: "GET", headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(5000), redirect: "manual" });
-    return res.status < 500 ? "healthy" : "error";
-  } catch {
-    return "error";
-  }
-}
 
 export const integrationRoutes: FastifyPluginAsyncZod = async (app) => {
   const tags = ["integrations"];
@@ -142,25 +135,49 @@ export const integrationRoutes: FastifyPluginAsyncZod = async (app) => {
 
   // ─── MCP servers ───
 
+  /** Connect and run tools/list; returns the fields to store. */
+  const discover = async (url: string, token: string | null) => {
+    try {
+      const r = await listMcpTools(url, token);
+      return { status: "healthy" as const, tools: r.tools.length, toolDefs: r.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema as Record<string, unknown>, annotations: t.annotations as Record<string, unknown> | undefined })), lastError: null, lastCheckedAt: new Date() };
+    } catch (e) {
+      return { status: "error" as const, lastError: (e as Error).message.slice(0, 300), lastCheckedAt: new Date() };
+    }
+  };
+
   app.get("/mcp-servers", { preHandler: app.authorize("workspace:read"), schema: { tags } }, async (req) => {
     const rows = await db.select().from(mcpServers).where(eq(mcpServers.workspaceId, auth(req).workspaceId)).orderBy(asc(mcpServers.createdAt));
     return { data: rows.map(serializeMcp) };
   });
 
-  app.post("/mcp-servers", { preHandler: app.authorize("connections:write"), schema: { tags, body: z.object({ name: z.string().trim().min(1).max(100), url: z.string().url().refine((u) => u.startsWith("https://") || (config.NODE_ENV !== "production" && /^http:\/\/localhost[:/]/.test(u)), "Use an https:// URL"), auth: z.enum(["oauth", "bearer", "none"]).default("none"), token: z.string().max(4000).optional() }) } }, async (req, reply) => {
-    const a = auth(req);
-    const status = await probe(req.body.url, req.body.token);
-    const [row] = await db.insert(mcpServers).values({ id: newId("mcp"), workspaceId: a.workspaceId, name: req.body.name, url: req.body.url, auth: req.body.auth, tokenEnc: req.body.token ? encrypt(req.body.token) : null, status }).returning();
-    await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "mcp.server.added", target: req.body.url, ip: req.ip });
-    return reply.status(201).send(serializeMcp(row));
-  });
+  app.post(
+    "/mcp-servers",
+    {
+      preHandler: app.authorize("connections:write"),
+      schema: { tags, body: z.object({ name: z.string().trim().min(1).max(100), url: z.string().url().refine((u) => u.startsWith("https://") || (config.NODE_ENV !== "production" && /^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(u)), "Use an https:// URL"), auth: z.enum(["oauth", "bearer", "none"]).default("none"), token: z.string().max(4000).optional() }) },
+    },
+    async (req, reply) => {
+      const a = auth(req);
+      if (req.body.auth === "oauth" && !req.body.token) throw badRequest("Paste an access token for this server (interactive MCP OAuth isn't supported yet)");
+      const found = await discover(req.body.url, req.body.token ?? null);
+      const [row] = await db.insert(mcpServers).values({ id: newId("mcp"), workspaceId: a.workspaceId, name: req.body.name, url: req.body.url, auth: req.body.auth, tokenEnc: req.body.token ? encrypt(req.body.token) : null, ...found }).returning();
+      await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "mcp.server.added", target: `${req.body.url} (${row.tools} tools)`, ip: req.ip });
+      return reply.status(201).send(serializeMcp(row));
+    },
+  );
 
   app.post("/mcp-servers/:id/check", { preHandler: app.authorize("connections:write"), schema: { tags, params: z.object({ id: z.string() }) } }, async (req) => {
     const a = auth(req);
     const row = assertFound((await db.select().from(mcpServers).where(and(eq(mcpServers.id, req.params.id), eq(mcpServers.workspaceId, a.workspaceId))))[0], "MCP server");
-    const status = await probe(row.url, row.tokenEnc ? decrypt(row.tokenEnc) : null);
-    const [u] = await db.update(mcpServers).set({ status }).where(eq(mcpServers.id, row.id)).returning();
+    const found = await discover(row.url, row.tokenEnc ? decrypt(row.tokenEnc) : null);
+    const [u] = await db.update(mcpServers).set(found).where(eq(mcpServers.id, row.id)).returning();
     return serializeMcp(u);
+  });
+
+  app.patch("/mcp-servers/:id", { preHandler: app.authorize("connections:write"), schema: { tags, params: z.object({ id: z.string() }), body: z.object({ enabled: z.boolean().optional(), name: z.string().trim().min(1).max(100).optional() }) } }, async (req) => {
+    const a = auth(req);
+    const [u] = await db.update(mcpServers).set(req.body).where(and(eq(mcpServers.id, req.params.id), eq(mcpServers.workspaceId, a.workspaceId))).returning();
+    return serializeMcp(assertFound(u, "MCP server"));
   });
 
   app.delete("/mcp-servers/:id", { preHandler: app.authorize("connections:write"), schema: { tags, params: z.object({ id: z.string() }) } }, async (req, reply) => {

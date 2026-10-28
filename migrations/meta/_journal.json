@@ -15,6 +15,13 @@
       "when": 1793178880950,
       "tag": "0001_connector_modes",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793179097624,
+      "tag": "0002_mcp_tools",
+      "breakpoints": true
     }
   ]
 }

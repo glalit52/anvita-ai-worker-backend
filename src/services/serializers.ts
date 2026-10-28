@@ -158,8 +158,8 @@ export function serializeNotification(n: typeof S.notifications.$inferSelect): C
   return { id: n.id, appId: n.appId, title: n.title, meta: n.meta, href: n.href, read: n.read, createdAt: n.createdAt.toISOString() };
 }
 
-export function serializeMcp(s: typeof S.mcpServers.$inferSelect): C.McpServer {
-  return { id: s.id, name: s.name, url: s.url, auth: s.auth, tools: s.tools, status: s.status };
+export function serializeMcp(s: typeof S.mcpServers.$inferSelect): C.McpServer & { enabled: boolean; toolNames: string[]; lastError: string | null; lastCheckedAt: string | null } {
+  return { id: s.id, name: s.name, url: s.url, auth: s.auth, tools: s.tools, status: s.status, enabled: s.enabled, toolNames: s.toolDefs.map((t) => t.name), lastError: s.lastError, lastCheckedAt: iso(s.lastCheckedAt) };
 }
 
 export function serializeQueueItem(q: typeof S.queueItems.$inferSelect): C.QueueItem & { workerId: string } {
