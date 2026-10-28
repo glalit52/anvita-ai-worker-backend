@@ -39,6 +39,12 @@ describe("auth", () => {
     expect(after.statusCode).toBe(401);
   });
 
+  it("rate-limits auth endpoints with a 429", async () => {
+    let last = 0;
+    for (let i = 0; i < 12; i++) last = (await ctx.app.inject({ method: "POST", url: "/v1/auth/login", payload: { email: "nobody@acme.in", password: "x" }, remoteAddress: "10.9.9.9" })).statusCode;
+    expect(last).toBe(429);
+  });
+
   it("requires auth", async () => {
     expect((await ctx.app.inject({ method: "GET", url: "/v1/threads" })).statusCode).toBe(401);
     expect((await ctx.app.inject({ method: "GET", url: "/v1/threads", headers: { authorization: "Bearer garbage" } })).statusCode).toBe(401);

@@ -182,3 +182,29 @@ describe("developer platform", () => {
     expect(Object.keys(spec.json().paths)).toEqual(expect.arrayContaining(["/v1/threads", "/v1/workers/{id}/runs", "/v1/approvals/{id}/decision"]));
   });
 });
+
+describe("client-generated ids", () => {
+  it("accepts optional ids for optimistic UIs and rejects duplicates", async () => {
+    const s = await signup(ctx.app);
+    const api = client(ctx.app, s);
+    const id = `t-${Math.random().toString(36).slice(2, 10)}`;
+    expect((await api.post("/v1/threads", { id, title: "x" })).body.id).toBe(id);
+    expect((await api.post("/v1/threads", { id, title: "x" })).status).toBe(409);
+    expect((await api.post("/v1/threads", { id: "../bad", title: "x" })).status).toBe(400);
+    const wid = `w-${Math.random().toString(36).slice(2, 10)}`;
+    expect((await api.post("/v1/workers", { id: wid, from: "blank" })).body.id).toBe(wid);
+    const dupId = `w-${Math.random().toString(36).slice(2, 10)}`;
+    expect((await api.post(`/v1/workers/${wid}/duplicate`, { id: dupId })).body.id).toBe(dupId);
+    const kbId = `kb-${Math.random().toString(36).slice(2, 10)}`;
+    expect((await api.post("/v1/knowledge-bases", { id: kbId, name: "K" })).body.id).toBe(kbId);
+  });
+});
+
+describe("CORS", () => {
+  it("allows the web app to use every write method", async () => {
+    const res = await ctx.app.inject({ method: "OPTIONS", url: "/v1/workers/x", headers: { origin: "http://localhost:3000", "access-control-request-method": "PATCH", "access-control-request-headers": "authorization,content-type" } });
+    expect(res.statusCode).toBe(204);
+    expect(String(res.headers["access-control-allow-methods"])).toMatch(/PATCH/);
+    expect(String(res.headers["access-control-allow-methods"])).toMatch(/DELETE/);
+  });
+});

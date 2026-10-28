@@ -33,7 +33,7 @@ async function meFor(userId: string) {
 
 export const authRoutes: FastifyPluginAsyncZod = async (app) => {
   const tags = ["auth"];
-  const loginLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
+  const loginLimit = { config: { rateLimit: { max: config.AUTH_RATE_LIMIT_PER_MINUTE, timeWindow: "1 minute" } } };
 
   app.post("/auth/signup", { ...loginLimit, schema: { tags, security: [], body: z.object({ name: z.string().trim().min(1).max(100), email, password, workspaceName: z.string().trim().min(1).max(100) }) } }, async (req, reply) => {
     if (!config.SIGNUP_ENABLED) throw forbidden("Sign-ups are disabled; ask an admin for an invite");

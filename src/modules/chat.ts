@@ -6,7 +6,7 @@ import type { ChatBlock } from "../contracts/web.js";
 import { db } from "../db/client.js";
 import { artifacts, messages, runs, runSteps, threads } from "../db/schema.js";
 import { assertFound, badRequest } from "../lib/errors.js";
-import { newId } from "../lib/ids.js";
+import { CLIENT_ID_RE, newId } from "../lib/ids.js";
 import { enqueue } from "../jobs/queue.js";
 import { auth, type AuthContext } from "../plugins/auth.js";
 import { assertCredits } from "../services/credits.js";
@@ -98,10 +98,10 @@ export const chatRoutes: FastifyPluginAsyncZod = async (app) => {
     return { data: rows.map((t) => serializeThread(t)), nextBefore: rows.length === req.query.limit ? rows[rows.length - 1].updatedAt.toISOString() : null };
   });
 
-  app.post("/threads", { preHandler: app.authorize("chat:write"), schema: { tags, body: z.object({ title: z.string().trim().max(200).optional(), text: z.string().trim().min(1).max(50_000).optional(), attachments: z.array(z.string()).max(10).optional(), web: z.boolean().optional() }) } }, async (req, reply) => {
+  app.post("/threads", { preHandler: app.authorize("chat:write"), schema: { tags, body: z.object({ id: z.string().regex(CLIENT_ID_RE).optional(), title: z.string().trim().max(200).optional(), text: z.string().trim().min(1).max(50_000).optional(), attachments: z.array(z.string()).max(10).optional(), web: z.boolean().optional() }) } }, async (req, reply) => {
     const a = auth(req);
     const title = req.body.title || (req.body.text ? (req.body.text.length > 60 ? `${req.body.text.slice(0, 58).trim()}…` : req.body.text) : "New chat");
-    const [t] = await db.insert(threads).values({ id: newId("thr"), workspaceId: a.workspaceId, createdBy: a.userId, title }).returning();
+    const [t] = await db.insert(threads).values({ id: req.body.id ?? newId("thr"), workspaceId: a.workspaceId, createdBy: a.userId, title }).returning();
     await publish({ workspaceId: a.workspaceId, threadId: t.id, type: "thread.created", data: serializeThread(t) });
     if (!req.body.text) return reply.status(201).send(serializeThread(t, []));
     const started = await startAgentRun(a, t.id, { text: req.body.text, attachments: req.body.attachments, web: req.body.web });

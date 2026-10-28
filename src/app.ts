@@ -36,6 +36,7 @@ export async function buildApp(opts: { logger?: boolean | object } = {}): Promis
   await app.register(cors, {
     origin: config.CORS_ORIGINS.split(",").map((s) => s.trim()),
     credentials: true,
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Authorization", "Content-Type", "X-Workspace-Id", "X-Request-Id", "Last-Event-ID", "Idempotency-Key"],
     exposedHeaders: ["X-Request-Id"],
   });
@@ -66,9 +67,11 @@ export async function buildApp(opts: { logger?: boolean | object } = {}): Promis
     if (hasZodFastifySchemaValidationErrors(err)) {
       return reply.status(400).send({ error: { code: "validation_error", message: "Request is invalid", details: err.validation.map((v) => ({ path: v.instancePath, message: v.message })) } });
     }
+    const pgCode = (err as { code?: string; cause?: { code?: string } }).cause?.code ?? (err as { code?: string }).code;
+    if (pgCode === "23505") return reply.status(409).send({ error: { code: "conflict", message: "A resource with this id already exists" } });
     if (err instanceof AppError) return reply.status(err.statusCode).send({ error: { code: err.code, message: err.message, details: err.details } });
     const e = err as { statusCode?: number; code?: string; message: string };
-    if (e.statusCode && e.statusCode < 500) return reply.status(e.statusCode).send({ error: { code: e.code ?? "bad_request", message: e.message } });
+    if (e.statusCode && e.statusCode < 500) return reply.status(e.statusCode).send({ error: { code: e.statusCode === 429 ? "rate_limited" : (e.code ?? "bad_request"), message: e.message } });
     req.log.error({ err }, "unhandled error");
     return reply.status(500).send({ error: { code: "internal", message: "Something went wrong", requestId: req.id } });
   });

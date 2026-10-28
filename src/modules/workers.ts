@@ -8,7 +8,7 @@ import { db } from "../db/client.js";
 import { evalCases, messages, queueItems, runs, threads, workers, workerVersions } from "../db/schema.js";
 import { hmacSha256, safeEqual } from "../lib/crypto.js";
 import { assertFound, badRequest, forbidden, unauthorized } from "../lib/errors.js";
-import { newId, randomString } from "../lib/ids.js";
+import { CLIENT_ID_RE, newId, randomString } from "../lib/ids.js";
 import { enqueue } from "../jobs/queue.js";
 import { auth } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
@@ -100,6 +100,8 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
       schema: {
         tags,
         body: workerPatch.extend({
+          id: z.string().regex(CLIENT_ID_RE).optional(),
+          createdFrom: z.enum(["template", "run", "autopilot", "scratch"]).optional(),
           from: z.enum(["blank", "template", "description", "thread"]).default("blank"),
           templateId: z.string().optional(),
           threadId: z.string().optional(),
@@ -109,7 +111,7 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
     },
     async (req, reply) => {
       const a = auth(req);
-      const { from, templateId, threadId, scheduleLabel, ...overrides } = req.body;
+      const { id: clientId, createdFrom, from, templateId, threadId, scheduleLabel, ...overrides } = req.body;
       let base: Worker;
       let sourceRunId: string | null = null;
       if (from === "template") {
@@ -142,7 +144,7 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
       const [w] = await db
         .insert(workers)
         .values({
-          id: newId("wrk"),
+          id: clientId ?? newId("wrk"),
           workspaceId: a.workspaceId,
           name: merged.name,
           description: merged.description,
@@ -158,7 +160,7 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
           apps: merged.apps,
           trigger: merged.trigger,
           schedule: merged.schedule !== undefined ? merged.schedule : cronFromTrigger(merged),
-          createdFrom: from === "thread" ? "run" : (merged.createdFrom ?? "scratch"),
+          createdFrom: createdFrom ?? (from === "thread" ? "run" : (merged.createdFrom ?? "scratch")),
           sourceRunId,
           templateId: templateId ?? null,
           pinned: merged.pinned ?? false,
@@ -194,10 +196,10 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
     return reply.status(204).send();
   });
 
-  app.post("/workers/:id/duplicate", { preHandler: app.authorize("workers:write"), schema: { tags, params: idParam } }, async (req, reply) => {
+  app.post("/workers/:id/duplicate", { preHandler: app.authorize("workers:write"), schema: { tags, params: idParam, body: z.object({ id: z.string().regex(CLIENT_ID_RE).optional() }).default({}) } }, async (req, reply) => {
     const a = auth(req);
     const w = await loadWorker(a.workspaceId, req.params.id);
-    const [copy] = await db.insert(workers).values({ ...w, id: newId("wrk"), name: `${w.name} (copy)`, status: "draft", version: 0, ownerId: a.userId, ownerName: a.userName, pinned: false, webhookSecret: `whsec_${randomString(32)}`, lastScheduledAt: null, createdAt: new Date(), updatedAt: new Date() }).returning();
+    const [copy] = await db.insert(workers).values({ ...w, id: req.body.id ?? newId("wrk"), name: `${w.name} (copy)`, status: "draft", version: 0, ownerId: a.userId, ownerName: a.userName, pinned: false, webhookSecret: `whsec_${randomString(32)}`, lastScheduledAt: null, createdAt: new Date(), updatedAt: new Date() }).returning();
     await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "worker.created", target: `${copy.name} (duplicate)`, ip: req.ip });
     return reply.status(201).send(serializeWorker(copy));
   });
@@ -272,12 +274,12 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
     return { data: rows.map(serializeEvalCase), summary: { total: rows.length, passed, passRate: rows.length ? passed / rows.length : 0, lastRunAt: rows.reduce<Date | null>((m, r) => (r.lastRunAt && (!m || r.lastRunAt > m) ? r.lastRunAt : m), null)?.toISOString() ?? null } };
   });
 
-  app.put("/workers/:id/evals", { preHandler: app.authorize("workers:write"), schema: { tags, params: idParam, body: z.object({ cases: z.array(z.object({ id: z.string().optional(), input: z.string().min(1).max(5000), expected: z.string().min(1).max(5000), category: z.string().max(50).default("general") })).max(200) }) } }, async (req) => {
+  app.put("/workers/:id/evals", { preHandler: app.authorize("workers:write"), schema: { tags, params: idParam, body: z.object({ cases: z.array(z.object({ id: z.string().optional(), input: z.string().min(1).max(5000), expected: z.string().min(1).max(5000), category: z.string().max(50).default("general"), score: z.number().min(0).max(1).optional(), pass: z.boolean().optional(), ms: z.number().int().min(0).optional() })).max(200) }) } }, async (req) => {
     const a = auth(req);
     await loadWorker(a.workspaceId, req.params.id);
     await db.transaction(async (tx) => {
       await tx.delete(evalCases).where(eq(evalCases.workerId, req.params.id));
-      if (req.body.cases.length) await tx.insert(evalCases).values(req.body.cases.map((c) => ({ id: c.id ?? newId("evc"), workerId: req.params.id, workspaceId: a.workspaceId, input: c.input, expected: c.expected, category: c.category })));
+      if (req.body.cases.length) await tx.insert(evalCases).values(req.body.cases.map((c) => ({ id: newId("evc"), workerId: req.params.id, workspaceId: a.workspaceId, input: c.input, expected: c.expected, category: c.category, score: c.score ?? 0, pass: c.pass ?? false, ms: c.ms ?? 0, lastRunAt: c.score !== undefined ? new Date() : null })));
     });
     const rows = await db.select().from(evalCases).where(eq(evalCases.workerId, req.params.id)).orderBy(asc(evalCases.createdAt));
     return { data: rows.map(serializeEvalCase) };

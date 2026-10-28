@@ -157,6 +157,9 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
     return act(a.workspaceId, req.params.id, { status: "taken", assigneeId: a.userId, assigneeName: a.userName });
   });
 
+  /** Hand back to the Worker / reopen. */
+  app.post("/inbox/:id/release", { preHandler: app.authorize("inbox:write"), schema: { tags: itags, params: idParam } }, async (req) => act(auth(req).workspaceId, req.params.id, { status: "open", assigneeId: null, assigneeName: null }));
+
   app.post("/inbox/:id/resolve", { preHandler: app.authorize("inbox:write"), schema: { tags: itags, params: idParam } }, async (req) => {
     const a = auth(req);
     const out = await act(a.workspaceId, req.params.id, { status: "resolved" });

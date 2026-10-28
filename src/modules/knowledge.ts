@@ -4,7 +4,7 @@ import { z } from "zod";
 import { db } from "../db/client.js";
 import { kbDocuments, kbSources, knowledgeBases, memories, skills, workspaces } from "../db/schema.js";
 import { assertFound, badRequest } from "../lib/errors.js";
-import { newId } from "../lib/ids.js";
+import { CLIENT_ID_RE, newId } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
 import { ingestDocument, searchKnowledge } from "../services/knowledge.js";
@@ -16,11 +16,15 @@ export const SKILL_PACKS: Record<string, { name: string; description: string; to
     { name: "GST reconciliation (GSTR-2B vs books)", description: "Match purchase register with GSTR-2B, flag mismatches by GSTIN and invoice.", tools: ["tally.vouchers.export"] },
     { name: "TDS deduction check", description: "Check vendor payments for applicable TDS sections and rates.", tools: ["tally.vouchers.export"] },
   ],
-  "Marketing analytics": [
+  "D2C Growth Pack": [
     { name: "Weekly ROAS & CAC review", description: "Pull ad spend and conversions, compute ROAS/CAC by channel and flag outliers.", tools: ["metaads.insights", "googleads.report", "ga4.report"] },
-  ],
-  "D2C operations": [
     { name: "RTO risk triage", description: "Score COD orders for RTO risk using pincode and history, confirm risky ones on WhatsApp.", tools: ["shopify.orders.search", "whatsapp.send"] },
+  ],
+  "HR & Payroll (PF, ESI)": [
+    { name: "Payroll pre-check", description: "Check payroll inputs, PF/ESI applicability and leave balances before the run.", tools: [] },
+  ],
+  "Exports & Customs": [
+    { name: "Shipping bill review", description: "Check shipping bills, IEC and RoDTEP claim eligibility.", tools: [] },
   ],
 };
 
@@ -40,9 +44,9 @@ export const knowledgeRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.get("/knowledge-bases", { preHandler: app.authorize("workspace:read"), schema: { tags } }, async (req) => ({ data: await kbWithCounts(auth(req).workspaceId) }));
 
-  app.post("/knowledge-bases", { preHandler: app.authorize("knowledge:write"), schema: { tags, body: z.object({ name: z.string().trim().min(1).max(100), description: z.string().max(1000).default("") }) } }, async (req, reply) => {
+  app.post("/knowledge-bases", { preHandler: app.authorize("knowledge:write"), schema: { tags, body: z.object({ id: z.string().regex(CLIENT_ID_RE).optional(), name: z.string().trim().min(1).max(100), description: z.string().max(1000).default("") }) } }, async (req, reply) => {
     const a = auth(req);
-    const [kb] = await db.insert(knowledgeBases).values({ id: newId("kb"), workspaceId: a.workspaceId, ...req.body }).returning();
+    const [kb] = await db.insert(knowledgeBases).values({ ...req.body, id: req.body.id ?? newId("kb"), workspaceId: a.workspaceId }).returning();
     await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "kb.created", target: kb.name, ip: req.ip });
     return reply.status(201).send((await kbWithCounts(a.workspaceId, [kb.id]))[0]);
   });

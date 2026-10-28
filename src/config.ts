@@ -41,6 +41,8 @@ const schema = z.object({
   SCHEDULER_ENABLED: bool.default(true),
 
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().default(600),
+  /** Per-client limit on login/signup/refresh/invite endpoints (brute-force protection). */
+  AUTH_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().default(10),
   SIGNUP_ENABLED: bool.default(true),
   /** Credits granted to a new workspace (Business plan default from the product spec). */
   DEFAULT_PLAN_CREDITS: z.coerce.number().int().default(200000),

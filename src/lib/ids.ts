@@ -17,3 +17,6 @@ export function newId(prefix: string): string {
 export function slugify(s: string): string {
   return s.toLowerCase().normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/[\s_-]+/g, "-").slice(0, 40) || "workspace";
 }
+
+/** Optional client-generated id (lets optimistic UIs navigate before the server responds). */
+export const CLIENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/;

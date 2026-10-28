@@ -130,7 +130,7 @@ its `approvers` field (e.g. "Owner"). API keys act with builder rights limited t
 
 ```bash
 createdb anvita_test     # or set TEST_DATABASE_URL
-npm test                 # 44 integration + unit tests against real Postgres
+npm test                 # 47 integration + unit tests against real Postgres
 npm run typecheck
 ```
 
@@ -142,6 +142,7 @@ scopes/revocation, signed outbound webhooks, OpenAPI and health checks.
 
 ## Deployment
 
+- The web app's live-mode e2e suite (`npm run test:e2e:live` in the frontend) exercises this API end to end in a browser.
 - `Dockerfile` builds a non-root image; `docker-compose.yml` runs Postgres + `api` + `worker`.
 - Migrations run on boot (`MIGRATE_ON_START=true`) or as a release step (`npm run db:migrate`). Generate new ones with `npm run db:generate` after editing `src/db/schema.ts`; CI checks they are in sync.
 - Scale the API horizontally (SSE fan-out uses Postgres `LISTEN/NOTIFY`); scale workers by replicas and `JOBS_CONCURRENCY`. Graceful shutdown drains in-flight jobs.
