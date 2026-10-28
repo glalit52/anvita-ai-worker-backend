@@ -252,7 +252,7 @@ export const chatRoutes: FastifyPluginAsyncZod = async (app) => {
    * resumes from `Last-Event-ID` / `?after=` after reconnects. EventSource clients may pass
    * `?access_token=` since they can't set headers.
    */
-  app.get("/events/stream", { preHandler: app.authorize("workspace:read"), schema: { tags: ["realtime"], querystring: z.object({ threadId: z.string().optional(), runId: z.string().optional(), after: z.coerce.number().int().optional(), access_token: z.string().optional() }) } }, async (req, reply) => {
+  app.get("/events/stream", { preHandler: app.authorize("workspace:read"), config: { tenant: false }, schema: { tags: ["realtime"], querystring: z.object({ threadId: z.string().optional(), runId: z.string().optional(), after: z.coerce.number().int().optional(), access_token: z.string().optional() }) } }, async (req, reply) => {
     const a = auth(req);
     const lastHeader = Number(req.headers["last-event-id"]);
     let last = Number.isFinite(lastHeader) && lastHeader > 0 ? lastHeader : (req.query.after ?? (await latestEventId(a.workspaceId)));

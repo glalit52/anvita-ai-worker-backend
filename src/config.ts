@@ -17,7 +17,7 @@ const schema = z.object({
   CORS_ORIGINS: z.string().default("http://localhost:3000"),
 
   DATABASE_URL: z.string().default("postgres://anvita:anvita@localhost:5432/anvita"),
-  DATABASE_POOL_MAX: z.coerce.number().int().default(10),
+  DATABASE_POOL_MAX: z.coerce.number().int().default(20),
 
   /** HMAC secret for access tokens. Must be >= 32 chars in production. */
   JWT_SECRET: z.string().min(16).default("dev-only-insecure-jwt-secret-change-me"),
@@ -39,6 +39,9 @@ const schema = z.object({
   JOBS_CONCURRENCY: z.coerce.number().int().default(4),
   JOBS_POLL_MS: z.coerce.number().int().default(1000),
   SCHEDULER_ENABLED: bool.default(true),
+
+  /** Row-level security: workspace-scoped requests run as a restricted DB role (needs migration 0009's role). */
+  RLS_ENABLED: bool.default(true),
 
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().default(600),
   /** Per-client limit on login/signup/refresh/invite endpoints (brute-force protection). */

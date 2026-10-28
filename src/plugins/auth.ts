@@ -21,8 +21,14 @@ export interface AuthContext {
 }
 
 declare module "fastify" {
+  interface FastifyContextConfig {
+    /** false: don't run this route's handler in a tenant (RLS) transaction — e.g. long-lived streams. */
+    tenant?: boolean;
+  }
   interface FastifyRequest {
     auth?: AuthContext;
+    /** Set by `authorize`: the handler runs inside the workspace's row-level-security scope. */
+    tenantScoped: boolean;
   }
   interface FastifyInstance {
     /** preHandler: requires an authenticated user/key bound to a workspace, optionally with a permission. */
@@ -115,6 +121,7 @@ function keyAllows(scopes: string[], perm?: Permission): boolean {
 
 export default fp(async (app: FastifyInstance) => {
   app.decorateRequest("auth", undefined);
+  app.decorateRequest("tenantScoped", false);
 
   app.decorate("authorize", (perm?: Permission) => async (req: FastifyRequest) => {
     const ctx = await resolve(req, true);
@@ -122,6 +129,7 @@ export default fp(async (app: FastifyInstance) => {
       throw forbidden(perm ? `Requires permission ${perm}` : undefined);
     }
     req.auth = ctx;
+    req.tenantScoped = true;
   });
 
   app.decorate("authenticateUser", async (req: FastifyRequest) => {

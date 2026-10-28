@@ -64,6 +64,13 @@
       "when": 1793204691430,
       "tag": "0008_embeddings",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793204918246,
+      "tag": "0009_tenant_rls",
+      "breakpoints": true
     }
   ]
 }

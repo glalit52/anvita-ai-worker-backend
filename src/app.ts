@@ -4,15 +4,17 @@ import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { hasZodFastifySchemaValidationErrors, jsonSchemaTransform, serializerCompiler, validatorCompiler, type ZodTypeProvider } from "fastify-type-provider-zod";
 import { config } from "./config.js";
-import { sqlClient } from "./db/client.js";
+import { initTenantIsolation, sqlClient, withTenant } from "./db/client.js";
 import { AppError } from "./lib/errors.js";
 import authPlugin from "./plugins/auth.js";
 import { registerRoutes } from "./modules/index.js";
 
 export async function buildApp(opts: { logger?: boolean | object } = {}): Promise<FastifyInstance> {
+  // Decided once per process, before any request: does the database have the tenant role?
+  const rlsReady = initTenantIsolation();
   const app = Fastify({
     logger:
       opts.logger ??
@@ -88,6 +90,42 @@ export async function buildApp(opts: { logger?: boolean | object } = {}): Promis
   });
 
   await app.register(authPlugin);
+  // Workspace-scoped handlers run in a tenant transaction (row-level security). Long-lived routes
+  // (SSE) opt out with `config: { tenant: false }` and filter by workspace themselves.
+  await rlsReady.then((on) => (on ? app.log.info("row-level security on") : config.RLS_ENABLED && app.log.warn("row-level security unavailable: run migrations as a role that can CREATE ROLE")));
+  app.addHook("onRoute", (route) => {
+    if ((route.config as { tenant?: boolean } | undefined)?.tenant === false) return;
+    const handler = route.handler;
+    route.handler = async function (this: FastifyInstance, req: FastifyRequest, reply: FastifyReply) {
+      if (!req.tenantScoped || !req.auth?.workspaceId) return handler.call(this, req, reply);
+      // reply.send()/redirect() inside the transaction are held until it commits, so a fast
+      // follow-up request always sees what this one wrote (and rollbacks never leak a 2xx).
+      let deferred: (() => unknown) | null = null;
+      const proxy: FastifyReply = new Proxy(reply, {
+        get(target, prop) {
+          if (prop === "then") return undefined;
+          if (prop === "send") return (payload?: unknown) => ((deferred = () => target.send(payload)), proxy);
+          if (prop === "redirect") return (...args: unknown[]) => ((deferred = () => (target.redirect as (...a: unknown[]) => unknown)(...args)), proxy);
+          const v = Reflect.get(target, prop, target);
+          return typeof v === "function"
+            ? (...args: unknown[]) => {
+                const r = (v as (...a: unknown[]) => unknown).apply(target, args);
+                return r === target ? proxy : r;
+              }
+            : v;
+        },
+      });
+      const result = await withTenant(req.auth.workspaceId, async () => {
+        const r = await handler.call(this, req, proxy);
+        return r === proxy ? undefined : r;
+      });
+      if (deferred) {
+        (deferred as () => unknown)();
+        return reply;
+      }
+      return result;
+    } as typeof handler;
+  });
   await app.register(registerRoutes, { prefix: "/v1" });
   return app;
 }
