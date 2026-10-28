@@ -63,14 +63,51 @@ Runs are serialized per run with an advisory lock; cancellation, step limits, re
 server-side web search when requested, and server-side refusal fallback (`fallbacks: "default"`).
 Model tiers are configurable (`MODEL_ACT`, `MODEL_PLAN`, `MODEL_FAST`).
 
-### Tools ([`src/runtime/tools/index.ts`](src/runtime/tools/index.ts))
+### Connectors ([`src/connectors`](src/connectors))
 
-Built-ins: `share_plan`, `kb_search` (Postgres full-text search with citations), `memory_search`,
-`memory_save`, `create_artifact` (reports, CSVs, chart specs, HTML dashboards). App actions:
-HubSpot, Shopify, Meta Ads, Google Ads, GA4, Zendesk, Tally, Google Calendar, Gmail, Slack,
-WhatsApp, Razorpay — each declares its side effect, policy facts (amount, recipients, external
-recipients…) and approval preview. Connectors run through a driver layer: **Slack is live** with a
-bot token; other apps use a clearly-labelled demo driver until their live drivers/OAuth are added.
+Every app action runs through one connector layer: a **live driver** when the workspace has
+credentials for the app, otherwise a clearly-labelled **demo driver** (results say "demo data"),
+so flows work before apps are set up.
+
+- **Auth:** OAuth 2.0 authorization-code flow (`POST /v1/connections/:appId/authorize` →
+  provider → `GET /v1/oauth/callback`, signed state, automatic token refresh) for Google
+  Workspace, Microsoft 365, Slack, HubSpot, Salesforce, Shopify, Zendesk, Notion and GitHub;
+  API keys / tokens for Slack, WhatsApp Cloud API, Meta Ads, HubSpot, Shopify, Zendesk,
+  Freshdesk, Intercom, Razorpay, Stripe, Delhivery, Mailchimp, Notion, GitHub, Jira, Linear and
+  Okta. Credentials are verified with a live call before they're saved and stored AES-256-GCM
+  encrypted; the API shows only `mode` (live/demo), the connected account and health.
+- **Live drivers:** Gmail (send, search), Google Calendar, Drive, Sheets (read, append), GA4,
+  Outlook (send, search), Slack (post, channels), WhatsApp (send), Meta Ads insights, HubSpot
+  deals (search, update), Salesforce SOQL (read-only), Shopify orders, Razorpay (payments,
+  refunds), Stripe (payments, refunds), Delhivery tracking, Zendesk (search, create), Freshdesk,
+  Intercom, Mailchimp, Notion search, GitHub issues (search, create), Jira (search, create),
+  Linear, Okta users. Still demo-only: Google Ads, Tally, Teams posting, Darwinbox, Workday,
+  QuickBooks, Zoho, BigQuery/Postgres (use an MCP server for databases).
+- **MCP servers:** Streamable-HTTP MCP servers are initialized and their tools listed on add;
+  the agent calls them as `mcp_<server>_<tool>`, with policies applied from each tool's
+  annotations (read-only runs freely; destructive or unannotated tools go through approvals).
+
+Built-in agent tools: `share_plan`, `kb_search` (cited knowledge search), `memory_search`,
+`memory_save`, `create_artifact`, and `handoff_to_human` in customer conversations.
+
+### Channels ([`src/channels`](src/channels))
+
+- **Slack:** point the Slack app's Event Subscriptions at `/v1/hooks/slack/events` (signed, deduped).
+  @mentions and DMs start a run in a thread that mirrors the Slack thread; the answer, file links
+  and approval/connect notices are posted back into the Slack thread.
+- **WhatsApp Cloud API:** webhook `/v1/hooks/whatsapp` (verify token + `X-Hub-Signature-256`).
+  Customer messages are answered by the live Worker bound to WhatsApp with a customer-safe prompt
+  and tool set. `handoff_to_human` moves the conversation to the Inbox; while a teammate has it,
+  customer messages go to the Inbox and replies from the Inbox are delivered on WhatsApp.
+
+### Payments and sign-in
+
+- **Credits checkout:** `POST /v1/billing/checkout` creates a Razorpay order (completed with
+  Razorpay Checkout and `POST /v1/billing/razorpay/verify`) or a Stripe Checkout session.
+  Signed webhooks (`/v1/hooks/razorpay`, `/v1/hooks/stripe`) grant credits exactly once.
+- **SSO:** `GET /v1/auth/sso/{google|microsoft}/start` → OpenID Connect with ID tokens verified
+  against the provider's JWKS (audience, issuer, nonce). First sign-in creates the account and a
+  workspace, or joins pending invites for that email.
 
 ### Policies ([`src/runtime/policy.ts`](src/runtime/policy.ts))
 
@@ -130,7 +167,7 @@ its `approvers` field (e.g. "Owner"). API keys act with builder rights limited t
 
 ```bash
 createdb anvita_test     # or set TEST_DATABASE_URL
-npm test                 # 47 integration + unit tests against real Postgres
+npm test                 # 92 integration + unit tests against real Postgres
 npm run typecheck
 ```
 
@@ -152,9 +189,8 @@ scopes/revocation, signed outbound webhooks, OpenAPI and health checks.
 
 Built to the MVP slice of the architecture doc; these pieces are stubbed or still to come:
 
-- **Live connectors:** Slack is live; others use the demo driver. Next: OAuth via an aggregator (Composio/Pipedream) plus native Google Workspace, HubSpot, Shopify, Razorpay drivers.
-- **Payments:** top-ups are recorded manually by admins; Stripe/Razorpay checkout plugs into `POST /billing/topup`.
-- **SSO/SCIM** (WorkOS), **channel gateways** (Slack events, WhatsApp Cloud API inbound), **MCP tool execution** (servers are registered and health-checked, tools not yet called).
+- **More connectors:** live drivers for the demo-only apps listed above; long-tail apps via an aggregator (Composio/Pipedream). Interactive MCP OAuth (servers take a bearer token today).
+- **SAML/SCIM** for enterprise identity (Google/Microsoft OIDC sign-in is done), Teams channel gateway, Slack interactive approval buttons.
 - **Sandbox** code execution (E2B) — artifacts are currently generated content (Markdown/CSV/JSON/HTML), not rendered PDFs/XLSX.
 - **Deterministic graph interpreter** — Worker runs currently execute their graph through the agent runtime, guided by the node list; a node-by-node interpreter (and Temporal) is the next step.
 - Embeddings + reranking for knowledge search (FTS today), Postgres RLS as defence-in-depth, OpenTelemetry tracing.

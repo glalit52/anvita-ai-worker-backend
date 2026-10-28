@@ -500,6 +500,22 @@ export const creditLedger = pgTable("credit_ledger", {
   createdAt: createdAt(),
 }, (t) => [index("credit_ledger_ws_idx").on(t.workspaceId, t.createdAt)]);
 
+export const payments = pgTable("payments", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  provider: text("provider").$type<"razorpay" | "stripe">().notNull(),
+  /** Razorpay order id or Stripe Checkout session id. */
+  providerRef: text("provider_ref"),
+  credits: integer("credits").notNull(),
+  /** Amount in the currency's minor unit (paise, cents). */
+  amount: integer("amount").notNull(),
+  currency: text("currency").notNull(),
+  status: text("status").$type<"created" | "paid" | "failed">().notNull().default("created"),
+  createdBy: text("created_by"),
+  createdAt: createdAt(),
+  paidAt: ts("paid_at"),
+}, (t) => [uniqueIndex("payments_provider_ref_uq").on(t.provider, t.providerRef)]);
+
 export const notifications = pgTable("notifications", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),

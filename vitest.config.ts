@@ -10,6 +10,12 @@ export default defineConfig({
       DATABASE_URL: process.env.TEST_DATABASE_URL ?? "postgres://anvita:anvita@localhost:5432/anvita_test",
       RATE_LIMIT_PER_MINUTE: "100000",
       SLACK_SIGNING_SECRET: "test-slack-secret",
+      RAZORPAY_KEY_ID: "rzp_test_key",
+      RAZORPAY_KEY_SECRET: "rzp_secret",
+      RAZORPAY_WEBHOOK_SECRET: "rzp_whsec",
+      STRIPE_SECRET_KEY: "sk_test_1",
+      STRIPE_WEBHOOK_SECRET: "whsec_stripe",
+      WEB_URL: "http://web.test",
     },
     // Tests share one database; run files sequentially.
     fileParallelism: false,

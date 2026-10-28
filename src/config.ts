@@ -47,6 +47,15 @@ const schema = z.object({
   /** Credits granted to a new workspace (Business plan default from the product spec). */
   DEFAULT_PLAN_CREDITS: z.coerce.number().int().default(200000),
 
+  /** Payments: Razorpay (India, UPI) and/or Stripe Checkout. Unset → admins record top-ups manually. */
+  RAZORPAY_KEY_ID: z.string().optional(),
+  RAZORPAY_KEY_SECRET: z.string().optional(),
+  RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
+  STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  /** Price of 1,000 credits in the smallest currency unit's major unit (₹100 by default). */
+  CREDITS_PRICE_PER_1000: z.coerce.number().default(100),
+  BILLING_CURRENCY: z.string().default("INR"),
   /** Signing secret of the Anvita Slack app (Events API). */
   SLACK_SIGNING_SECRET: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),

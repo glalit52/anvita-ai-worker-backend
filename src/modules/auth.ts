@@ -11,6 +11,7 @@ import { auth, signAccessToken } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
 import { serializeUser } from "../services/serializers.js";
 import { createWorkspace } from "../services/workspace.js";
+import { ssoFinish, ssoProviders, ssoStartUrl } from "../services/sso.js";
 
 const email = z.string().trim().toLowerCase().email().max(254);
 const password = z.string().min(10, "Use at least 10 characters").max(200);
@@ -103,6 +104,54 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     await db.update(memberships).set({ userId, status: "active", inviteTokenHash: null, name: req.body.name ?? m.name, lastActiveAt: new Date() }).where(eq(memberships.id, m.id));
     await audit({ workspaceId: m.workspaceId, actor: req.body.name ?? m.name, actorId: userId, action: "member.joined", target: m.email, ip: req.ip });
     return { ...(await issueTokens(userId, req.headers["user-agent"])), ...(await meFor(userId)), workspaceId: m.workspaceId };
+  });
+
+  // ─── Single sign-on (Google, Microsoft) ───
+
+  app.get("/auth/sso/providers", { schema: { tags, security: [] } }, async () => ssoProviders());
+
+  app.get("/auth/sso/:provider/start", { ...loginLimit, schema: { tags, security: [], params: z.object({ provider: z.enum(["google", "microsoft"]) }), querystring: z.object({ redirect: z.string().max(300).default("/home") }) } }, async (req, reply) => {
+    const redirect = req.query.redirect.startsWith("/") && !req.query.redirect.startsWith("//") ? req.query.redirect : "/home";
+    return reply.redirect(await ssoStartUrl(req.params.provider, redirect));
+  });
+
+  /**
+   * SSO callback: verify the ID token, then sign in the matching user — creating the account (and
+   * a workspace) on first sign-in and activating pending invites for that email. Tokens go back
+   * to the web app in the URL fragment so they never reach server logs.
+   */
+  app.get("/auth/sso/:provider/callback", { schema: { tags, security: [], hide: true, params: z.object({ provider: z.enum(["google", "microsoft"]) }), querystring: z.object({ code: z.string().optional(), state: z.string().optional(), error: z.string().optional(), error_description: z.string().optional() }) } }, async (req, reply) => {
+    const fail = (msg: string) => reply.redirect(`${config.WEB_URL}/login?sso_error=${encodeURIComponent(msg.slice(0, 200))}`);
+    if (req.query.error || !req.query.code || !req.query.state) return fail(req.query.error_description ?? req.query.error ?? "Sign-in was cancelled");
+    let id;
+    try {
+      id = await ssoFinish(req.params.provider, req.query.code, req.query.state);
+    } catch (e) {
+      req.log.warn({ err: e }, "sso failed");
+      return fail((e as Error).message);
+    }
+    let [u] = await db.select().from(users).where(eq(users.email, id.email));
+    let workspaceId: string | null = null;
+    if (!u) {
+      if (!config.SIGNUP_ENABLED) {
+        const [invited] = await db.select().from(memberships).where(and(eq(memberships.email, id.email), eq(memberships.status, "invited")));
+        if (!invited) return fail("No Anvita account for this email — ask an admin for an invite");
+      }
+      const userId = newId("usr");
+      [u] = await db.insert(users).values({ id: userId, email: id.email, name: id.name, lastActiveAt: new Date() }).returning();
+    }
+    // Pending invites for this (verified) email are accepted automatically.
+    await db.update(memberships).set({ userId: u.id, status: "active", sso: true, inviteTokenHash: null, lastActiveAt: new Date() }).where(and(eq(memberships.email, id.email), eq(memberships.status, "invited")));
+    const [m] = await db.select().from(memberships).where(and(eq(memberships.userId, u.id), eq(memberships.status, "active")));
+    if (!m) {
+      const domain = id.email.split("@")[1];
+      const consumer = ["gmail.com", "outlook.com", "hotmail.com", "yahoo.com", "icloud.com", "live.com"].includes(domain);
+      workspaceId = await db.transaction((tx) => createWorkspace(tx, { name: consumer ? `${id.name.split(" ")[0]}'s workspace` : domain.split(".")[0].replace(/^./, (c) => c.toUpperCase()), owner: { userId: u.id, name: u.name, email: u.email } }));
+    } else workspaceId = m.workspaceId;
+    await db.update(users).set({ lastActiveAt: new Date() }).where(eq(users.id, u.id));
+    const t = await issueTokens(u.id, req.headers["user-agent"]);
+    const frag = new URLSearchParams({ access_token: t.accessToken, refresh_token: t.refreshToken, workspace_id: workspaceId ?? "", redirect: m ? id.redirect : "/onboarding" });
+    return reply.redirect(`${config.WEB_URL}/auth/callback#${frag}`);
   });
 
   app.get("/me", { preHandler: app.authenticateUser, schema: { tags } }, async (req) => {

@@ -2,9 +2,11 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { db } from "../db/client.js";
-import { approvals, creditLedger, inboxConversations, messages, runs, threads, workers, workspaces } from "../db/schema.js";
+import { approvals, creditLedger, inboxConversations, messages, payments, runs, threads, workers, workspaces } from "../db/schema.js";
 import { sendToChannel } from "../channels/deliver.js";
-import { AppError, assertFound, conflict } from "../lib/errors.js";
+import { AppError, assertFound, badRequest, conflict } from "../lib/errors.js";
+import { config } from "../config.js";
+import { createCheckout, markPaid, providers, verifyRazorpayPayment } from "../services/payments.js";
 import { newId } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
@@ -27,12 +29,29 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
     return { data: rows.map((r) => ({ id: r.id, delta: r.delta, reason: r.reason, refType: r.refType, refId: r.refId, createdAt: r.createdAt.toISOString() })) };
   });
 
-  /**
-   * Credit top-up. Until a payment provider (Stripe / Razorpay) is configured this records an
-   * admin-approved manual top-up; the checkout integration plugs in here.
-   */
+  app.get("/billing/providers", { preHandler: app.authorize("workspace:read"), schema: { tags: ["billing"] } }, async () => ({ ...providers(), pricePer1000: config.CREDITS_PRICE_PER_1000, currency: config.BILLING_CURRENCY }));
+
+  /** Start a credit purchase: a Razorpay order (complete it with Checkout, then /billing/razorpay/verify) or a Stripe Checkout URL. */
+  app.post("/billing/checkout", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], body: z.object({ credits: z.number().int().min(1000).max(10_000_000), provider: z.enum(["razorpay", "stripe"]).optional() }) } }, async (req) => {
+    const a = auth(req);
+    return createCheckout({ workspaceId: a.workspaceId, userId: a.userId, credits: req.body.credits, provider: req.body.provider });
+  });
+
+  /** Razorpay Checkout success handler: verify the signature and grant credits (the webhook does the same, idempotently). */
+  app.post("/billing/razorpay/verify", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], body: z.object({ orderId: z.string(), paymentId: z.string(), signature: z.string() }) } }, async (req) => {
+    const a = auth(req);
+    if (!verifyRazorpayPayment(req.body.orderId, req.body.paymentId, req.body.signature)) throw badRequest("Payment signature didn't verify");
+    const [p] = await db.select().from(payments).where(and(eq(payments.provider, "razorpay"), eq(payments.providerRef, req.body.orderId), eq(payments.workspaceId, a.workspaceId)));
+    assertFound(p, "Payment");
+    await markPaid("razorpay", req.body.orderId, { razorpayPaymentId: req.body.paymentId });
+    return getBalance(a.workspaceId);
+  });
+
+  /** Manual top-up for self-hosted / development setups without a payment provider. */
   app.post("/billing/topup", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], body: z.object({ credits: z.number().int().min(1000).max(10_000_000), reference: z.string().max(200).optional() }) } }, async (req) => {
     const a = auth(req);
+    const avail = providers();
+    if (avail.razorpay || avail.stripe) throw badRequest("Buy credits through checkout");
     await grant(a.workspaceId, req.body.credits, "topup", { by: a.userId, provider: "manual", reference: req.body.reference ?? null });
     await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "billing.topup", target: `${req.body.credits.toLocaleString("en-IN")} credits`, ip: req.ip });
     const balance = await getBalance(a.workspaceId);
@@ -85,6 +104,19 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
       })
       .from(approvals)
       .where(and(eq(approvals.workspaceId, a.workspaceId), gte(approvals.createdAt, since)));
+    const byMember = await db
+      .select({ name: sql<string>`coalesce(${runs.createdByName}, 'Unknown')`, runs: sql<number>`count(*)::int`, credits: sql<number>`coalesce(sum(${runs.creditsUsed}),0)::int`, succeeded: sql<number>`count(*) filter (where ${runs.status} = 'succeeded')::int` })
+      .from(runs)
+      .where(and(scope, eq(runs.kind, "agent")))
+      .groupBy(sql`1`)
+      .orderBy(sql`2 desc`)
+      .limit(25);
+    const byChannel = await db
+      .select({ channel: runs.trigger, runs: sql<number>`count(*)::int`, credits: sql<number>`coalesce(sum(${runs.creditsUsed}),0)::int` })
+      .from(runs)
+      .where(scope)
+      .groupBy(runs.trigger)
+      .orderBy(sql`2 desc`);
     const finished = totals.succeeded + totals.failed;
     return {
       days: req.query.days,
@@ -95,6 +127,8 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
       hoursSaved: Math.round((totals.succeeded * 12) / 60),
       byDay,
       byWorker: byWorker.map((w) => ({ ...w, successRate: w.runs ? w.succeeded / w.runs : 0 })),
+      byMember,
+      byChannel,
       approvals: appr,
       balance: await getBalance(a.workspaceId),
     };
