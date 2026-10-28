@@ -63,6 +63,16 @@ const schema = z.object({
   RESEND_API_KEY: z.string().optional(),
 
   /**
+   * Knowledge embeddings (1024 dims, stored with pgvector). voyage / openai call those APIs; "hash"
+   * is a keyword-hashing fallback for development and tests; "none" keeps search keyword-only.
+   * Default: voyage or openai when its key is set, hash outside production, otherwise none.
+   */
+  EMBEDDINGS_PROVIDER: z.enum(["voyage", "openai", "hash", "none"]).optional(),
+  EMBEDDINGS_MODEL: z.string().optional(),
+  VOYAGE_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+
+  /**
    * Code sandbox. "docker" runs each step in a throwaway container (no network, read-only root,
    * CPU/memory/pid limits) and is the default in production. "process" runs a local interpreter in
    * a network-less user namespace with rlimits — for development only. "disabled" turns code off.
@@ -93,6 +103,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 }
 
 export const config = loadConfig();
+
+export function embeddingsProvider(): "voyage" | "openai" | "hash" | "none" {
+  if (config.EMBEDDINGS_PROVIDER) return config.EMBEDDINGS_PROVIDER;
+  if (config.VOYAGE_API_KEY) return "voyage";
+  if (config.OPENAI_API_KEY) return "openai";
+  return config.NODE_ENV === "production" ? "none" : "hash";
+}
 
 export function sandboxProvider(): "docker" | "process" | "disabled" {
   return config.SANDBOX_PROVIDER ?? (config.NODE_ENV === "production" ? "docker" : "process");

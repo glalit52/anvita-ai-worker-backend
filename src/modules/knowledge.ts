@@ -6,6 +6,9 @@ import { kbDocuments, kbSources, knowledgeBases, memories, skills, workspaces } 
 import { assertFound, badRequest } from "../lib/errors.js";
 import { CLIENT_ID_RE, newId } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
+import { embeddingsProvider } from "../config.js";
+import { embeddingModel, vectorsReady } from "../services/embeddings.js";
+import { enqueue } from "../jobs/queue.js";
 import { audit } from "../services/audit.js";
 import { ingestDocument, searchKnowledge } from "../services/knowledge.js";
 import { serializeKb, serializeMemory, serializeSkill } from "../services/serializers.js";
@@ -116,6 +119,23 @@ export const knowledgeRoutes: FastifyPluginAsyncZod = async (app) => {
   });
 
   // ─── Memory ───
+
+  /** How search works in this workspace, and how much of the knowledge is indexed semantically. */
+  app.get("/knowledge/status", { preHandler: app.authorize("workspace:read"), schema: { tags } }, async (req) => {
+    const a = auth(req);
+    const semantic = await vectorsReady();
+    const [c] = (await db.execute(sql`select count(*)::int as chunks from kb_chunks where workspace_id = ${a.workspaceId}`)) as unknown as { chunks: number }[];
+    const embedded = semantic ? Number(((await db.execute(sql`select count(*)::int as n from kb_embeddings where workspace_id = ${a.workspaceId} and model = ${embeddingModel()}`)) as unknown as { n: number }[])[0]?.n ?? 0) : 0;
+    return { mode: semantic ? "hybrid" : "keyword", provider: embeddingsProvider(), model: semantic ? embeddingModel() : null, chunks: c?.chunks ?? 0, embedded };
+  });
+
+  /** Re-embed everything that's missing (e.g. after switching provider or enabling pgvector). */
+  app.post("/knowledge/reindex", { preHandler: app.authorize("knowledge:write"), schema: { tags } }, async (req, reply) => {
+    const a = auth(req);
+    if (!(await vectorsReady())) throw badRequest("Semantic search isn't available: enable pgvector and set VOYAGE_API_KEY or OPENAI_API_KEY");
+    await enqueue("kb.embed", { workspaceId: a.workspaceId }, { maxAttempts: 5 });
+    return reply.status(202).send({ queued: true });
+  });
 
   app.get("/memories", { preHandler: app.authorize("workspace:read"), schema: { tags: ["memory"], querystring: z.object({ q: z.string().optional(), scope: z.string().optional(), type: z.string().optional() }) } }, async (req) => {
     const a = auth(req);

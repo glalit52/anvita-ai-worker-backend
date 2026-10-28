@@ -57,6 +57,13 @@
       "when": 1793204033810,
       "tag": "0007_custom_apis",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793204691430,
+      "tag": "0008_embeddings",
+      "breakpoints": true
     }
   ]
 }

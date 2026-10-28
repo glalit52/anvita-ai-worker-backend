@@ -7,6 +7,7 @@ import { deliverRun } from "../channels/deliver.js";
 import { handleSlackEvent, type SlackEventEnvelope } from "../channels/slack.js";
 import { handleWhatsAppMessage, type WaChange } from "../channels/whatsapp.js";
 import { runWorkerEvals } from "../runtime/evals.js";
+import { embedMissing } from "../services/embeddings.js";
 import { publish } from "../services/events.js";
 import { serializeApproval } from "../services/serializers.js";
 import { deliverWebhook } from "../services/webhooks.js";
@@ -20,6 +21,9 @@ export function registerJobHandlers() {
   registerJob("slack.event", (p, { log }) => handleSlackEvent(p as unknown as SlackEventEnvelope, log));
   registerJob("whatsapp.message", (p, { log }) => handleWhatsAppMessage(p as unknown as WaChange, log));
   registerJob("channel.deliver", (p) => deliverRun(String(p.runId)));
+  registerJob("kb.embed", async (p) => {
+    await embedMissing({ documentId: p.documentId ? String(p.documentId) : undefined, workspaceId: p.workspaceId ? String(p.workspaceId) : undefined, limit: 2000 });
+  });
 }
 
 /**
@@ -48,6 +52,9 @@ export async function schedulerTick(log: FastifyBaseLogger, now = new Date()) {
     await publish({ workspaceId: a.workspaceId, threadId: a.threadId, runId: a.runId, type: "approval.updated", data: serializeApproval(a) });
     if (a.runId) await enqueue("run.advance", { runId: a.runId });
   }
+
+  // Catch-up for chunks that missed embedding (provider outage, pgvector enabled later…).
+  if (now.getUTCMinutes() % 10 === 0) await enqueue("kb.embed", {}, { dedupeKey: `kb.embed:${minute.toISOString()}` }).catch(() => {});
 
   if (now.getUTCMinutes() === 0) {
     await db.delete(events).where(lt(events.createdAt, new Date(now.getTime() - 3 * 86400_000)));
