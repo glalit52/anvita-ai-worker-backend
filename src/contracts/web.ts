@@ -9,7 +9,7 @@ export interface Member {
   name: string;
   email: string;
   role: Role;
-  status: "active" | "invited";
+  status: "active" | "invited" | "suspended";
   lastActive: string;
   sso?: boolean;
 }

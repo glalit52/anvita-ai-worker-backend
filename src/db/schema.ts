@@ -64,8 +64,11 @@ export const memberships = pgTable("memberships", {
   email: text("email").notNull(),
   name: text("name").notNull(),
   role: text("role").$type<Role>().notNull(),
-  status: text("status").$type<"active" | "invited">().notNull().default("active"),
+  /** suspended = deprovisioned by SCIM (kept for audit history; can't sign in to this workspace). */
+  status: text("status").$type<"active" | "invited" | "suspended">().notNull().default("active"),
   sso: boolean("sso").notNull().default(false),
+  /** IdP's id for this person (SCIM externalId), if provisioned. */
+  externalId: text("external_id"),
   inviteTokenHash: text("invite_token_hash"),
   invitedBy: text("invited_by"),
   lastActiveAt: ts("last_active_at"),
@@ -74,6 +77,33 @@ export const memberships = pgTable("memberships", {
   uniqueIndex("memberships_ws_email_uq").on(t.workspaceId, sql`lower(${t.email})`),
   index("memberships_user_idx").on(t.userId),
 ]);
+
+/** Enterprise sign-in (SAML 2.0) and provisioning (SCIM 2.0), one per workspace. */
+export const ssoConfigs = pgTable("sso_configs", {
+  workspaceId: text("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  /** IdP single sign-on URL (HTTP-Redirect binding). */
+  entryPoint: text("entry_point"),
+  idpIssuer: text("idp_issuer"),
+  /** IdP signing certificate(s), PEM. */
+  idpCert: text("idp_cert"),
+  /** Email domains routed to this IdP from the login page. */
+  domains: text("domains").array().notNull().default(sql`'{}'::text[]`),
+  /** Members with these domains must use SSO (password sign-in refused). */
+  enforced: boolean("enforced").notNull().default(false),
+  /** Create members on first SSO sign-in (otherwise SCIM or invites only). */
+  allowJit: boolean("allow_jit").notNull().default(true),
+  defaultRole: text("default_role").$type<Role>().notNull().default("member"),
+  scimTokenHash: text("scim_token_hash"),
+  scimTokenHint: text("scim_token_hint"),
+  updatedAt: updatedAt(),
+});
+
+/** Consumed SAML assertion ids (replay protection across instances). */
+export const samlReplays = pgTable("saml_replays", {
+  id: text("id").primaryKey(),
+  expiresAt: ts("expires_at").notNull(),
+});
 
 export const refreshTokens = pgTable("refresh_tokens", {
   id: text("id").primaryKey(),

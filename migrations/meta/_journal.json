@@ -71,6 +71,13 @@
       "when": 1793204918246,
       "tag": "0009_tenant_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793205982921,
+      "tag": "0010_enterprise_sso",
+      "breakpoints": true
     }
   ]
 }

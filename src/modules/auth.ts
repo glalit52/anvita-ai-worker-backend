@@ -5,7 +5,8 @@ import { config } from "../config.js";
 import { db } from "../db/client.js";
 import { memberships, refreshTokens, users, workspaces } from "../db/schema.js";
 import { hashPassword, sha256, verifyPassword } from "../lib/crypto.js";
-import { badRequest, conflict, forbidden, unauthorized } from "../lib/errors.js";
+import { AppError, badRequest, conflict, forbidden, unauthorized } from "../lib/errors.js";
+import { samlLoginUrl, ssoForEmail } from "../services/saml.js";
 import { newId, randomString } from "../lib/ids.js";
 import { auth, signAccessToken } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
@@ -16,7 +17,7 @@ import { ssoFinish, ssoProviders, ssoStartUrl } from "../services/sso.js";
 const email = z.string().trim().toLowerCase().email().max(254);
 const password = z.string().min(10, "Use at least 10 characters").max(200);
 
-async function issueTokens(userId: string, userAgent?: string) {
+export async function issueTokens(userId: string, userAgent?: string) {
   const refresh = `rt_${randomString(48)}`;
   await db.insert(refreshTokens).values({ id: newId("rtk"), userId, tokenHash: sha256(refresh), userAgent: userAgent?.slice(0, 200) ?? null, expiresAt: new Date(Date.now() + config.REFRESH_TOKEN_TTL_DAYS * 86400_000) });
   return { accessToken: await signAccessToken(userId), refreshToken: refresh, expiresIn: config.ACCESS_TOKEN_TTL_SECONDS, tokenType: "Bearer" };
@@ -53,6 +54,9 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
   app.post("/auth/login", { ...loginLimit, schema: { tags, security: [], body: z.object({ email, password: z.string().min(1) }) } }, async (req) => {
     const [u] = await db.select().from(users).where(eq(users.email, req.body.email));
     if (!u || !(await verifyPassword(req.body.password, u.passwordHash))) throw unauthorized("Email or password is incorrect");
+    // Organisations that enforce SAML don't allow password sign-in for their domains.
+    const sso = await ssoForEmail(req.body.email);
+    if (sso?.enforced) throw new AppError(403, "sso_required", "Your organisation requires single sign-on", { loginUrl: samlLoginUrl(sso.workspaceId) });
     await db.update(users).set({ lastActiveAt: new Date() }).where(eq(users.id, u.id));
     return { ...(await issueTokens(u.id, req.headers["user-agent"])), ...(await meFor(u.id)) };
   });
