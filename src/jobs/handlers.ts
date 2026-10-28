@@ -3,6 +3,9 @@ import type { FastifyBaseLogger } from "fastify";
 import { db } from "../db/client.js";
 import { approvals, events, jobs, workers } from "../db/schema.js";
 import { advanceRun } from "../runtime/agent.js";
+import { deliverRun } from "../channels/deliver.js";
+import { handleSlackEvent, type SlackEventEnvelope } from "../channels/slack.js";
+import { handleWhatsAppMessage, type WaChange } from "../channels/whatsapp.js";
 import { runWorkerEvals } from "../runtime/evals.js";
 import { publish } from "../services/events.js";
 import { serializeApproval } from "../services/serializers.js";
@@ -14,6 +17,9 @@ export function registerJobHandlers() {
   registerJob("run.advance", (p, { log }) => advanceRun(String(p.runId), log));
   registerJob("webhook.deliver", (p) => deliverWebhook(String(p.deliveryId)));
   registerJob("evals.run", (p) => runWorkerEvals(String(p.workspaceId), String(p.workerId)));
+  registerJob("slack.event", (p, { log }) => handleSlackEvent(p as unknown as SlackEventEnvelope, log));
+  registerJob("whatsapp.message", (p, { log }) => handleWhatsAppMessage(p as unknown as WaChange, log));
+  registerJob("channel.deliver", (p) => deliverRun(String(p.runId)));
 }
 
 /**

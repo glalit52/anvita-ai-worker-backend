@@ -114,11 +114,13 @@ export const connections = pgTable("connections", {
   mode: text("mode").$type<"live" | "demo">().notNull().default("demo"),
   /** Human label of the connected account (Slack team, shop domain, email…). */
   account: text("account"),
+  /** Provider-side id used to route inbound events (Slack team id, WhatsApp phone number id). */
+  externalId: text("external_id"),
   /** Last health-check outcome shown in the UI. */
   statusDetail: text("status_detail"),
   actionsUsed30d: integer("actions_used_30d").notNull().default(0),
   createdAt: createdAt(),
-}, (t) => [uniqueIndex("connections_ws_app_uq").on(t.workspaceId, t.appId)]);
+}, (t) => [uniqueIndex("connections_ws_app_uq").on(t.workspaceId, t.appId), index("connections_external_idx").on(t.appId, t.externalId)]);
 
 export const mcpServers = pgTable("mcp_servers", {
   id: text("id").primaryKey(),
@@ -150,9 +152,11 @@ export const threads = pgTable("threads", {
   unread: boolean("unread").notNull().default(false),
   status: text("status").$type<"running" | "waiting" | "done">().notNull().default("done"),
   workerId: text("worker_id"),
+  /** Channel conversation this thread mirrors, e.g. `slack:C123:1700.1` or `wa:<phone id>:<customer>`. */
+  externalRef: text("external_ref"),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
-}, (t) => [index("threads_ws_updated_idx").on(t.workspaceId, t.updatedAt)]);
+}, (t) => [index("threads_ws_updated_idx").on(t.workspaceId, t.updatedAt), uniqueIndex("threads_external_uq").on(t.workspaceId, t.externalRef)]);
 
 export const messages = pgTable("messages", {
   id: text("id").primaryKey(),
@@ -187,6 +191,8 @@ export const runs = pgTable("runs", {
   estimateCredits: integer("estimate_credits"),
   creditsUsed: integer("credits_used").notNull().default(0),
   stepsCount: integer("steps_count").notNull().default(0),
+  /** Assistant-message blocks already posted back to the originating channel (Slack/WhatsApp). */
+  deliveredBlocks: integer("delivered_blocks").notNull().default(0),
   error: text("error"),
   startedAt: ts("started_at"),
   endedAt: ts("ended_at"),
@@ -365,6 +371,8 @@ export const inboxConversations = pgTable("inbox_conversations", {
   assigneeId: text("assignee_id"),
   assigneeName: text("assignee_name"),
   notes: text("notes").notNull().default(""),
+  /** Thread mirroring the customer conversation; human replies are delivered back through it. */
+  threadId: text("thread_id"),
   waitingSince: ts("waiting_since").notNull().defaultNow(),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
@@ -526,6 +534,12 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
   lastError: text("last_error"),
   createdAt: createdAt(),
   deliveredAt: ts("delivered_at"),
+});
+
+/** Inbound channel event ids already processed (providers retry deliveries). */
+export const channelEvents = pgTable("channel_events", {
+  id: text("id").primaryKey(),
+  createdAt: createdAt(),
 });
 
 // ─── Durable jobs ──────────────────────────────────────────────────────────────

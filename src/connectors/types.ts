@@ -44,8 +44,8 @@ export interface AppConnector {
   apiKey?: { fields: FieldSpec[]; help: string };
   /** Build auth headers for API calls. */
   headers: (c: Credentials) => Record<string, string>;
-  /** Cheap authenticated call proving the credentials work; returns a human description. */
-  test?: (call: Caller) => Promise<string>;
+  /** Cheap authenticated call proving the credentials work; returns a description (and optionally provider facts to keep). */
+  test?: (call: Caller) => Promise<string | { detail: string; extra: Record<string, string> }>;
 }
 
 /** Authenticated HTTP for one connection (handles refresh, retries, JSON). */

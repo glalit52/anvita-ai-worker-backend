@@ -47,6 +47,8 @@ const schema = z.object({
   /** Credits granted to a new workspace (Business plan default from the product spec). */
   DEFAULT_PLAN_CREDITS: z.coerce.number().int().default(200000),
 
+  /** Signing secret of the Anvita Slack app (Events API). */
+  SLACK_SIGNING_SECRET: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().default("Anvita <no-reply@anvita.ai>"),
 });

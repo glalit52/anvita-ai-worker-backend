@@ -1,0 +1,1 @@
+ALTER TABLE "runs" ADD COLUMN "delivered_blocks" integer DEFAULT 0 NOT NULL;

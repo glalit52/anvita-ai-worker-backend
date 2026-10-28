@@ -128,7 +128,9 @@ async function callScripted(call: ModelCall): Promise<ModelTurn> {
   const isTask = reads.length > 0 || !!wantsArtifact || wantsEmail;
 
   const turns: { name: string; input: Record<string, unknown> }[][] = [];
-  if (isTask) {
+  const wantsHuman = available.has("handoff_to_human") && /\b(human|person|agent|manager|someone real|useless)\b/i.test(text);
+  if (wantsHuman) turns.push([{ name: "handoff_to_human", input: { reason: "Customer asked for a person", summary: text.slice(0, 300), sentiment: "negative" } }]);
+  if (isTask && !wantsHuman) {
     const steps = [...reads.map((r) => `Get data via ${r.name.split("_")[0]}`), wantsArtifact ? `Build the ${wantsArtifact[1].toLowerCase()}` : "Write up the answer", ...(wantsEmail ? ["Send it (with your approval)"] : [])];
     turns.push([{ name: "share_plan", input: { steps } }]);
     if (reads.length) turns.push(reads);
@@ -152,7 +154,9 @@ async function callScripted(call: ModelCall): Promise<ModelTurn> {
 
   const toolResults = call.messages.flatMap((m) => (m.role === "user" && Array.isArray(m.content) ? m.content.filter((b) => b.type === "tool_result") : []));
   const rejected = toolResults.some((r) => JSON.stringify(r).includes("rejected"));
-  const answer = isTask
+  const answer = wantsHuman
+    ? "I've passed this to a teammate — they'll reply here shortly."
+    : isTask
     ? `Done. Here's what I found:\n\n• **Top insight:** the last 7 days are up 12% vs the previous week.\n• **Watch out:** 3 items look unusual — I've flagged them${wantsArtifact ? " in the file" : " below"}.\n• **Next step:** I can keep tracking this and alert you if it moves more than 10%.${wantsEmail ? (rejected ? "\n\nOkay — I didn't send the email. The draft is saved if you change your mind." : "\n\n✅ Sent, and logged in the audit trail.") : ""}`
     : `Happy to help with that. ${text ? `You asked: “${text.slice(0, 120)}”. ` : ""}Tell me which apps or files to use and I'll get it done.`;
   for (const chunk of answer.match(/.{1,24}/gs) ?? []) call.onText?.(chunk);

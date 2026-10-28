@@ -4,7 +4,7 @@ import { z } from "zod";
 import { config } from "../config.js";
 import type { ChatBlock } from "../contracts/web.js";
 import { db } from "../db/client.js";
-import { artifacts, messages, runs, runSteps, threads } from "../db/schema.js";
+import { artifacts, messages, runs, runSteps, threads, workers } from "../db/schema.js";
 import { assertFound, badRequest } from "../lib/errors.js";
 import { CLIENT_ID_RE, newId } from "../lib/ids.js";
 import { enqueue } from "../jobs/queue.js";
@@ -55,7 +55,15 @@ async function buildTranscript(threadId: string, text: string, attachmentIds: st
   return transcript;
 }
 
-export async function startAgentRun(a: AuthContext, threadId: string, body: { text: string; attachments?: string[]; web?: boolean }) {
+export interface RunOptions {
+  /** Run as this Worker (instructions, apps). Used for channel-bound Workers like WhatsApp support. */
+  workerId?: string | null;
+  trigger?: string;
+  /** End-customer conversation: adds the human-handoff tool and keeps internal tools away. */
+  customer?: boolean;
+}
+
+export async function startAgentRun(a: AuthContext, threadId: string, body: { text: string; attachments?: string[]; web?: boolean }, opts: RunOptions = {}) {
   await assertCredits(a.workspaceId, 50);
   const thread = assertFound((await db.select().from(threads).where(and(eq(threads.id, threadId), eq(threads.workspaceId, a.workspaceId))))[0], "Thread");
   const attachments = body.attachments ?? [];
@@ -66,14 +74,14 @@ export async function startAgentRun(a: AuthContext, threadId: string, body: { te
   const runId = newId("run");
   const now = Date.now();
   const userMsg = { id: newId("msg"), workspaceId: a.workspaceId, threadId: thread.id, role: "user" as const, author: a.userName, authorId: a.userId, runId, createdAt: new Date(now), blocks: [{ type: "text", text: body.text }, ...files.map((f) => ({ type: "artifact", artifact: { id: f.id, kind: f.kind, title: f.title, subtitle: f.subtitle ?? undefined, size: `${Math.max(1, Math.round(f.sizeBytes / 1024))} KB` } }))] };
-  const asstMsg = { id: newId("msg"), workspaceId: a.workspaceId, threadId: thread.id, role: "assistant" as const, author: "Anvita", runId, streaming: true, createdAt: new Date(now + 1), blocks: [] };
+  const asstMsg = { id: newId("msg"), workspaceId: a.workspaceId, threadId: thread.id, role: "assistant" as const, author: opts.workerId ? ((await db.select({ name: workers.name }).from(workers).where(eq(workers.id, opts.workerId)))[0]?.name ?? "Anvita") : "Anvita", runId, streaming: true, createdAt: new Date(now + 1), blocks: [] };
 
   const result = await db.transaction(async (tx) => {
     const [um] = await tx.insert(messages).values(userMsg).returning();
     const [am] = await tx.insert(messages).values(asstMsg).returning();
     const [run] = await tx
       .insert(runs)
-      .values({ id: runId, workspaceId: a.workspaceId, kind: "agent", threadId: thread.id, trigger: "chat", assistantMessageId: am.id, createdBy: a.userId, createdByName: a.userName, input: { text: body.text, web: !!body.web, attachments }, state: { transcript, turns: 0, sources: [], toolSteps: 0 } })
+      .values({ id: runId, workspaceId: a.workspaceId, kind: "agent", threadId: thread.id, workerId: opts.workerId ?? null, trigger: opts.trigger ?? "chat", assistantMessageId: am.id, createdBy: a.userId, createdByName: a.userName, input: { text: body.text, web: !!body.web, attachments, ...(opts.customer ? { customer: true } : {}) }, state: { transcript, turns: 0, sources: [], toolSteps: 0 } })
       .returning();
     const [t] = await tx.update(threads).set({ status: "running", updatedAt: new Date() }).where(eq(threads.id, thread.id)).returning();
     await publish({ workspaceId: a.workspaceId, threadId: thread.id, runId, type: "message.created", data: serializeMessage(um) }, tx);

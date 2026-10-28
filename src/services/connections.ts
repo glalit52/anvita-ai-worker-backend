@@ -78,6 +78,7 @@ export async function saveConnection(input: SaveInput) {
     sharedWith: input.sharedWith ?? [],
     mode: input.credentials ? ("live" as const) : ("demo" as const),
     account: input.credentials ? accountLabel(input.appId, input.credentials) : null,
+    externalId: input.credentials ? (input.appId === "slack" ? input.credentials.extra?.teamId : input.appId === "whatsapp" ? input.credentials.fields?.phone_number_id : undefined) ?? null : null,
     credentialsEnc: input.credentials ? encrypt(JSON.stringify(input.credentials)) : null,
   };
   const [row] = await db

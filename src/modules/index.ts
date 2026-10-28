@@ -8,8 +8,10 @@ import { knowledgeRoutes } from "./knowledge.js";
 import { opsRoutes } from "./ops.js";
 import { workerHookRoutes, workerRoutes } from "./workers.js";
 import { workspaceRoutes } from "./workspace.js";
+import { channelRoutes } from "./channels.js";
 
 export const registerRoutes: FastifyPluginAsync = async (app) => {
   for (const r of [authRoutes, workspaceRoutes, chatRoutes, approvalRoutes, integrationRoutes, workerRoutes, knowledgeRoutes, governanceRoutes, opsRoutes]) await app.register(r);
   await app.register(workerHookRoutes);
+  await app.register(channelRoutes);
 };

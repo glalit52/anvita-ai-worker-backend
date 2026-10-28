@@ -1,4 +1,4 @@
-import type { AppConnector, Credentials } from "./types.js";
+import { ConnectorError, type AppConnector, type Credentials } from "./types.js";
 
 /**
  * How each app authenticates. OAuth apps need `<ENV>_CLIENT_ID` / `<ENV>_CLIENT_SECRET` set on
@@ -51,9 +51,9 @@ export const CONNECTORS: AppConnector[] = [
     apiKey: { fields: [{ key: "botToken", label: "Bot token", secret: true, placeholder: "xoxb-…" }], help: "Create a Slack app, install it to your workspace and paste its Bot User OAuth Token." },
     headers: bearer,
     test: async (call) => {
-      const r = await call<{ ok: boolean; team: string; error?: string }>("https://slack.com/api/auth.test", { method: "POST" });
-      if (!r.ok) throw new Error(r.error ?? "Slack auth failed");
-      return `Connected to ${r.team}`;
+      const r = await call<{ ok: boolean; team: string; team_id: string; user_id?: string; error?: string }>("https://slack.com/api/auth.test", { method: "POST" });
+      if (!r.ok) throw new ConnectorError(r.error ?? "Slack auth failed", r.error === "invalid_auth" ? 401 : undefined);
+      return { detail: `Connected to ${r.team}`, extra: { teamId: r.team_id, teamName: r.team, ...(r.user_id ? { botUserId: r.user_id } : {}) } };
     },
   },
   {

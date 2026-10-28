@@ -32,7 +32,11 @@ export async function runLive(appId: string, action: string, input: Record<strin
 export async function testConnection(appId: string, connection: { id: string | null; credentials: Credentials }): Promise<string> {
   const c = connectorFor(appId);
   if (!c?.test) return "Credentials saved (this app has no test call)";
-  return c.test(makeCaller(appId, connection.id, connection.credentials));
+  const r = await c.test(makeCaller(appId, connection.id, connection.credentials));
+  if (typeof r === "string") return r;
+  // Keep provider facts (e.g. Slack team id) on the credentials for routing inbound events.
+  connection.credentials.extra = { ...(connection.credentials.extra ?? {}), ...r.extra };
+  return r.detail;
 }
 
 export { connectorFor, oauthConfigured, CONNECTORS } from "./providers.js";

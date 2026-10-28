@@ -2,14 +2,15 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { db } from "../db/client.js";
-import { approvals, creditLedger, inboxConversations, runs, workers, workspaces } from "../db/schema.js";
-import { assertFound, conflict } from "../lib/errors.js";
+import { approvals, creditLedger, inboxConversations, messages, runs, threads, workers, workspaces } from "../db/schema.js";
+import { sendToChannel } from "../channels/deliver.js";
+import { AppError, assertFound, conflict } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
 import { getBalance, grant, usageByDay } from "../services/credits.js";
 import { publish } from "../services/events.js";
-import { serializeInbox } from "../services/serializers.js";
+import { serializeInbox, serializeMessage } from "../services/serializers.js";
 
 export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
   const idParam = z.object({ id: z.string() });
@@ -173,6 +174,19 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
     const [cur] = await db.select().from(inboxConversations).where(and(eq(inboxConversations.id, req.params.id), eq(inboxConversations.workspaceId, a.workspaceId)));
     const c = assertFound(cur, "Conversation");
     const time = new Date().toISOString();
+    // Deliver to the customer first (WhatsApp etc.); only record the reply once it's sent.
+    if (c.threadId) {
+      const [t] = await db.select().from(threads).where(eq(threads.id, c.threadId));
+      if (t?.externalRef) {
+        try {
+          await sendToChannel(a.workspaceId, t.externalRef, req.body.text);
+        } catch (e) {
+          throw new AppError(502, "delivery_failed", `Couldn't deliver the reply: ${(e as Error).message}`);
+        }
+        const [msg] = await db.insert(messages).values({ id: newId("msg"), workspaceId: a.workspaceId, threadId: t.id, role: "assistant", author: a.userName, authorId: a.userId, blocks: [{ type: "text", text: req.body.text }] }).returning();
+        await publish({ workspaceId: a.workspaceId, threadId: t.id, type: "message.created", data: serializeMessage(msg) });
+      }
+    }
     return act(a.workspaceId, c.id, { transcript: [...c.transcript, { from: "agent", text: req.body.text, time }], status: c.status === "open" ? "taken" : c.status, assigneeId: c.assigneeId ?? a.userId, assigneeName: c.assigneeName ?? a.userName });
   });
 

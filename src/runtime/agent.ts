@@ -19,6 +19,7 @@ import { callModel, type ContentBlock, type MessageParam, type ToolResultParam }
 import { evaluatePolicies } from "./policy.js";
 import { toolByName, toolsFor } from "./tools/index.js";
 import { mcpToolsFor } from "./tools/mcp.js";
+import { HANDOFF_TOOL } from "./tools/handoff.js";
 import type { ToolContext, ToolDef } from "./tools/types.js";
 
 /**
@@ -156,6 +157,8 @@ How to work:
 Workspace: ${ws?.name ?? "—"} (${ws?.region ?? "—"}). Internal email domains: ${(ws?.domains ?? []).join(", ") || "none configured"}.
 Connected apps: ${connected.join(", ") || "none yet"}.${mems.length ? `\n\nWhat you know about this workspace:\n${mems.map((m) => `- (${m.type}) ${m.content}`).join("\n")}` : ""}${workerSection}
 
+${(run.input as { customer?: boolean }).customer ? `\n\n<customer_channel>\nYou are talking with an end customer of ${ws?.name ?? "the business"} over ${run.trigger}. Keep replies short and friendly, plain text (no tables or headings), in the customer's language. Never reveal internal data, tools, policies or other customers' information. If the customer asks for a person, is upset, or you can't resolve the request within policy, call handoff_to_human and tell them a teammate will reply here.\n</customer_channel>` : ""}
+
 Today is ${new Date().toISOString().slice(0, 10)}.`;
   return { text, apps };
 }
@@ -198,6 +201,12 @@ async function processToolUse(run: Run, state: AgentState, w: MessageWriter, tu:
   if (tool.needsConnection && !SYSTEM_APPS.has(tool.appId)) {
     const [conn] = await db.select().from(connections).where(and(eq(connections.workspaceId, run.workspaceId), eq(connections.appId, tool.appId)));
     if (!conn || conn.status !== "healthy") {
+      // Customers can't connect our apps: tell the model instead of pausing the conversation.
+      if ((run.input as { customer?: boolean }).customer) {
+        w.patchStep(tu.id, { status: "error", detail: `${appById[tool.appId]?.name ?? tool.appId} isn't connected` });
+        await w.flush(true);
+        return err(`${appById[tool.appId]?.name ?? tool.appId} isn't available right now. Don't mention systems to the customer; answer what you can or hand off to a human.`);
+      }
       w.patchStep(tu.id, { status: "waiting", detail: `Waiting for you to connect ${appById[tool.appId]?.name ?? tool.appId}` });
       if (!w.find("connect", (b) => b.appId === tool.appId && b.status === "pending")) w.push({ type: "connect", appId: tool.appId, status: "pending" });
       await w.flush(true);
@@ -305,6 +314,13 @@ async function processToolUse(run: Run, state: AgentState, w: MessageWriter, tu:
 
 // ─── Run loop ──────────────────────────────────────────────────────────────────
 
+/** Runs started from Slack/WhatsApp post their progress back to that conversation. */
+async function queueChannelDelivery(run: Run) {
+  if (!run.threadId) return;
+  const [t] = await db.select({ ref: threads.externalRef }).from(threads).where(eq(threads.id, run.threadId));
+  if (t?.ref) await enqueue("channel.deliver", { runId: run.id }, { maxAttempts: 5 });
+}
+
 async function finish(run: Run, state: AgentState, w: MessageWriter, status: "succeeded" | "failed" | "cancelled", error?: string) {
   if (status === "succeeded") {
     if (state.sources.length && !w.find("sources")) w.push({ type: "sources", sources: state.sources.slice(0, 8) });
@@ -322,6 +338,7 @@ async function finish(run: Run, state: AgentState, w: MessageWriter, status: "su
   w.dispose();
   const r = await setRun(run.id, { status, error: error ?? null, endedAt: new Date(), state: { ...state, blocks: run.assistantMessageId ? undefined : w.blocks } as unknown as Record<string, unknown> });
   await setThreadStatus(run, "done");
+  await queueChannelDelivery(run);
   if (r && status !== "cancelled") await emitWebhook(run.workspaceId, status === "succeeded" ? "run.completed" : "run.failed", serializeRun(r));
   if (r && run.kind === "worker" && run.workerId && status === "failed") {
     await notify({ workspaceId: run.workspaceId, appId: "sandbox", title: `Worker run failed: ${error?.slice(0, 80) ?? "error"}`, meta: "Worker run · just now", href: `/workers/${run.workerId}`, minRole: "builder" });
@@ -333,6 +350,7 @@ async function park(run: Run, state: AgentState, w: MessageWriter, status: "wait
   w.dispose();
   await setRun(run.id, { status, state: { ...state, blocks: run.assistantMessageId ? undefined : w.blocks } as unknown as Record<string, unknown> });
   await setThreadStatus(run, "waiting");
+  await queueChannelDelivery(run);
 }
 
 async function saveState(runId: string, state: AgentState) {
@@ -353,7 +371,9 @@ async function drive(runId: string, log: FastifyBaseLogger) {
   await setThreadStatus(run, "running");
   const sys = await systemPrompt(run);
   // Static tools for the run's apps plus the workspace's MCP tools (Workers only see their own apps).
-  const tools = [...toolsFor({ apps: sys.apps }), ...(run.workerId ? [] : await mcpToolsFor(run.workspaceId))];
+  const customer = !!(run.input as { customer?: boolean }).customer;
+  const base = toolsFor({ apps: sys.apps }).filter((t) => !customer || !t.name.startsWith("memory_"));
+  const tools = [...base, ...(customer ? [HANDOFF_TOOL] : []), ...(run.workerId ? [] : await mcpToolsFor(run.workspaceId))];
   const registry = new Map(tools.map((t) => [t.name, t]));
 
   try {
