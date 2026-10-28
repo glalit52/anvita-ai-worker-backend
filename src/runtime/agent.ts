@@ -5,7 +5,7 @@ import { config } from "../config.js";
 import type { ChatBlock, RunStep } from "../contracts/web.js";
 import { db, sqlClient } from "../db/client.js";
 import { approvals, artifacts, connections, memories, messages, runs, runSteps, threads, workers, workspaces } from "../db/schema.js";
-import { decrypt } from "../lib/crypto.js";
+import { parseCredentials } from "../connectors/index.js";
 import { newId } from "../lib/ids.js";
 import { enqueue } from "../jobs/queue.js";
 import { audit } from "../services/audit.js";
@@ -193,7 +193,7 @@ async function processToolUse(run: Run, state: AgentState, w: MessageWriter, tu:
   await w.flush(true);
 
   // 1) Connection
-  let credentials: Record<string, unknown> | null = null;
+  let connection: ToolContext["connection"] = null;
   if (tool.needsConnection && !SYSTEM_APPS.has(tool.appId)) {
     const [conn] = await db.select().from(connections).where(and(eq(connections.workspaceId, run.workspaceId), eq(connections.appId, tool.appId)));
     if (!conn || conn.status !== "healthy") {
@@ -205,13 +205,14 @@ async function processToolUse(run: Run, state: AgentState, w: MessageWriter, tu:
     const cb = w.find("connect", (b) => b.appId === tool.appId && b.status === "pending");
     if (cb) cb.status = "connected";
     w.patchStep(tu.id, { status: "running", detail: undefined });
-    credentials = conn.credentialsEnc ? (JSON.parse(decrypt(conn.credentialsEnc)) as Record<string, unknown>) : null;
+    const creds = parseCredentials(conn.credentialsEnc);
+    connection = creds ? { id: conn.id, credentials: creds } : null;
     await db.update(connections).set({ actionsUsed30d: sql`${connections.actionsUsed30d} + 1` }).where(eq(connections.id, conn.id));
   }
 
   const [ws] = await db.select({ domains: workspaces.domains }).from(workspaces).where(eq(workspaces.id, run.workspaceId));
   const actor = run.kind === "worker" ? { type: "worker" as const, name: (await db.select({ name: workers.name }).from(workers).where(eq(workers.id, run.workerId ?? "")))[0]?.name ?? "Worker" } : { type: "agent" as const, name: "Anvita" };
-  const ctx: ToolContext = { workspaceId: run.workspaceId, runId: run.id, threadId: run.threadId, actor, onBehalfOf: { userId: run.createdBy, name: run.createdByName ?? "—" }, workspaceDomains: ws?.domains ?? [], credentials };
+  const ctx: ToolContext = { workspaceId: run.workspaceId, runId: run.id, threadId: run.threadId, actor, onBehalfOf: { userId: run.createdBy, name: run.createdByName ?? "—" }, workspaceDomains: ws?.domains ?? [], connection };
 
   // 2) Policy & approval
   let input = tu.input;

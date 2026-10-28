@@ -82,8 +82,8 @@ export function serializeMember(m: typeof S.memberships.$inferSelect): C.Member 
   return { id: m.id, userId: m.userId, name: m.name, email: m.email, role: m.role, status: m.status, lastActive: m.lastActiveAt ? m.lastActiveAt.toISOString() : "—", sso: m.sso || undefined };
 }
 
-export function serializeConnection(c: typeof S.connections.$inferSelect): C.Connection & { id: string; hasCredentials: boolean } {
-  return { id: c.id, appId: c.appId, scope: c.scope, connectedBy: c.connectedByName, connectedAt: c.createdAt.toISOString(), status: c.status, sharedWith: c.sharedWith.length ? c.sharedWith : undefined, actionsUsed30d: c.actionsUsed30d, hasCredentials: !!c.credentialsEnc };
+export function serializeConnection(c: typeof S.connections.$inferSelect): C.Connection & { id: string; hasCredentials: boolean; mode: "live" | "demo"; account: string | null; statusDetail: string | null } {
+  return { id: c.id, appId: c.appId, scope: c.scope, connectedBy: c.connectedByName, connectedAt: c.createdAt.toISOString(), status: c.status, sharedWith: c.sharedWith.length ? c.sharedWith : undefined, actionsUsed30d: c.actionsUsed30d, hasCredentials: !!c.credentialsEnc, mode: c.mode, account: c.account, statusDetail: c.statusDetail };
 }
 
 export function serializeWorker(w: typeof S.workers.$inferSelect, stats?: { runs30d: number; successRate: number; avgCredits: number; lastRun: Date | null }): C.Worker & Record<string, unknown> {

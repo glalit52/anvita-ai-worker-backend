@@ -110,6 +110,12 @@ export const connections = pgTable("connections", {
   sharedWith: text("shared_with").array().notNull().default(sql`'{}'::text[]`),
   /** AES-256-GCM encrypted JSON credentials (never returned by the API, never sent to the model). */
   credentialsEnc: text("credentials_enc"),
+  /** live = real credentials (OAuth or API key); demo = sample-data driver. */
+  mode: text("mode").$type<"live" | "demo">().notNull().default("demo"),
+  /** Human label of the connected account (Slack team, shop domain, email…). */
+  account: text("account"),
+  /** Last health-check outcome shown in the UI. */
+  statusDetail: text("status_detail"),
   actionsUsed30d: integer("actions_used_30d").notNull().default(0),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("connections_ws_app_uq").on(t.workspaceId, t.appId)]);

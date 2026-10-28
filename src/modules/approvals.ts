@@ -47,7 +47,7 @@ export const approvalRoutes: FastifyPluginAsyncZod = async (app) => {
       if (req.body.decision === "approved" && req.body.payload) {
         const tool = [...toolByName.values()].find((t) => t.action === row.action);
         patch.payload = { ...row.payload, ...req.body.payload };
-        const re = tool?.approval?.(patch.payload as never, { workspaceId: a.workspaceId, runId: row.runId ?? "", threadId: row.threadId, actor: row.requestedBy, onBehalfOf: { userId: null, name: row.onBehalfOf }, workspaceDomains: [], credentials: null });
+        const re = tool?.approval?.(patch.payload as never, { workspaceId: a.workspaceId, runId: row.runId ?? "", threadId: row.threadId, actor: row.requestedBy, onBehalfOf: { userId: null, name: row.onBehalfOf }, workspaceDomains: [], connection: null });
         if (re) patch.preview = re.preview;
       }
       // Conditional update guards against two approvers racing.

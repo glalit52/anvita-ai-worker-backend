@@ -5,7 +5,7 @@ import { artifacts, memories } from "../../db/schema.js";
 import { newId } from "../../lib/ids.js";
 import { searchKnowledge } from "../../services/knowledge.js";
 import { demoData } from "./demo-data.js";
-import { slackPostMessage } from "./slack.js";
+import { hasLiveDriver, runLive } from "../../connectors/index.js";
 import type { ToolContext, ToolDef, ToolResult } from "./types.js";
 
 const str = (description: string) => ({ type: "string", description });
@@ -15,18 +15,19 @@ function emailDomain(addr: string) {
   return addr.split("@")[1]?.toLowerCase().trim() ?? "";
 }
 
-/** Runs an app action through the connector layer: a live driver when one exists and credentials are present, otherwise the demo driver. */
-async function runConnector(action: string, input: Record<string, unknown>, ctx: ToolContext, summarize: (out: Record<string, unknown>) => string): Promise<ToolResult> {
-  let output: Record<string, unknown>;
-  if (action === "slack.post_message" && typeof ctx.credentials?.botToken === "string") {
-    output = await slackPostMessage(ctx.credentials.botToken, String(input.channel), String(input.text));
-  } else {
-    output = demoData(action, input);
-  }
-  return { output, summary: summarize(output), credits: 2 };
+/**
+ * Run an app action through the connector layer: the live driver when the connection has
+ * credentials, otherwise the clearly-labelled demo driver (so flows work before apps are set up).
+ */
+async function runConnector(appId: string, action: string, input: Record<string, unknown>, ctx: ToolContext, summarize: (out: Record<string, any>) => string): Promise<ToolResult> {
+  const live = ctx.connection && hasLiveDriver(action);
+  const output = live ? await runLive(appId, action, input, ctx.connection!) : demoData(action, input);
+  return { output, summary: `${summarize(output)}${live ? "" : " · demo data"}`, credits: 2 };
 }
 
-function readTool(o: { name: string; action: string; appId: string; description: string; properties: Record<string, unknown>; required?: string[]; label: string; summary: (out: Record<string, unknown>) => string }): ToolDef {
+type Summ = (out: Record<string, any>) => string;
+
+function appTool(o: { name: string; action: string; appId: string; description: string; properties: Record<string, unknown>; required?: string[]; label: string | ((i: any) => string); summary: Summ; sideEffect?: ToolDef["sideEffect"] }): ToolDef {
   return {
     name: o.name,
     action: o.action,
@@ -34,12 +35,14 @@ function readTool(o: { name: string; action: string; appId: string; description:
     kind: "tool",
     description: o.description,
     inputSchema: { type: "object", properties: o.properties, required: o.required ?? [] },
-    sideEffect: "none",
+    sideEffect: o.sideEffect ?? "none",
     needsConnection: true,
-    label: () => o.label,
-    execute: (input, ctx) => runConnector(o.action, input, ctx, o.summary),
+    label: typeof o.label === "string" ? () => o.label as string : o.label,
+    execute: (input, ctx) => runConnector(o.appId, o.action, input, ctx, o.summary),
   };
 }
+const readTool = appTool;
+const n = (v: unknown) => (Array.isArray(v) ? v.length : Number(v ?? 0));
 
 export const TOOLS: ToolDef[] = [
   {
@@ -136,11 +139,11 @@ export const TOOLS: ToolDef[] = [
   },
 
   readTool({ name: "hubspot_deals_search", action: "hubspot.deals.search", appId: "hubspot", label: "Searched HubSpot deals", description: "Search HubSpot deals (pipeline, stages, amounts) for a date range or query.", properties: { query: str("Free-text filter"), range: str("e.g. last_7d, last_30d") }, summary: (o) => `${o.total ?? 0} deals` }),
-  readTool({ name: "shopify_orders_search", action: "shopify.orders.search", appId: "shopify", label: "Queried Shopify orders", description: "Summarise Shopify orders, revenue, RTO and top products/cities for a range.", properties: { range: str("e.g. last_7d") }, summary: (o) => `${o.orders_last_7d ?? 0} orders` }),
+  readTool({ name: "shopify_orders_search", action: "shopify.orders.search", appId: "shopify", label: "Queried Shopify orders", description: "Summarise Shopify orders, revenue, RTO and top products/cities for a range.", properties: { range: str("e.g. last_7d") }, summary: (o) => `${o.orders ?? o.orders_last_7d ?? 0} orders` }),
   readTool({ name: "metaads_insights", action: "metaads.insights", appId: "metaads", label: "Fetched Meta Ads insights", description: "Get Meta Ads spend, ROAS and CPA by campaign.", properties: { range: str("e.g. last_7d") }, summary: (o) => `ROAS ${o.roas}` }),
   readTool({ name: "googleads_report", action: "googleads.report", appId: "googleads", label: "Fetched Google Ads report", description: "Get Google Ads spend, conversions and CPA.", properties: { range: str("e.g. last_7d") }, summary: (o) => `${o.conversions} conversions` }),
-  readTool({ name: "ga4_report", action: "ga4.report", appId: "ga4", label: "Pulled Google Analytics sessions", description: "Get GA4 sessions, conversion rate and top sources.", properties: { range: str("e.g. last_7d") }, summary: (o) => `${o.sessions} sessions` }),
-  readTool({ name: "zendesk_tickets_search", action: "zendesk.tickets.search", appId: "zendesk", label: "Searched Zendesk tickets", description: "Search Zendesk tickets; returns counts, CSAT and top contact reasons.", properties: { query: str("Filter") }, summary: (o) => `${o.open} open tickets` }),
+  readTool({ name: "ga4_report", action: "ga4.report", appId: "ga4", label: "Pulled Google Analytics sessions", description: "Get GA4 sessions, conversion rate and top sources.", properties: { range: str("e.g. last_7d"), property_id: str("GA4 property id (optional; defaults to the connected property)") }, summary: (o) => `${o.sessions} sessions` }),
+  readTool({ name: "zendesk_tickets_search", action: "zendesk.tickets.search", appId: "zendesk", label: "Searched Zendesk tickets", description: "Search Zendesk tickets; returns counts, CSAT and top contact reasons.", properties: { query: str("Filter") }, summary: (o) => `${o.count ?? o.open ?? 0} tickets` }),
   readTool({ name: "tally_vouchers_export", action: "tally.vouchers.export", appId: "tally", label: "Exported Tally vouchers", description: "Export Tally vouchers and GST summary for a period.", properties: { period: str("e.g. 2026-10") }, summary: (o) => `${o.vouchers} vouchers` }),
   readTool({ name: "gcal_events_list", action: "gcal.events.list", appId: "gcal", label: "Checked Google Calendar", description: "List upcoming calendar events.", properties: { days: { type: "number" } }, summary: (o) => `${(o.events as unknown[] | undefined)?.length ?? 0} events` }),
 
@@ -154,7 +157,7 @@ export const TOOLS: ToolDef[] = [
     sideEffect: "write",
     needsConnection: true,
     label: () => "Created Zendesk ticket",
-    execute: (input, ctx) => runConnector("zendesk.tickets.create", input, ctx, (o) => `Ticket #${o.ticket_id}`),
+    execute: (input, ctx) => runConnector("zendesk", "zendesk.tickets.create", input, ctx, (o) => `Ticket #${o.ticket_id}`),
   },
   {
     name: "hubspot_deal_update",
@@ -172,7 +175,7 @@ export const TOOLS: ToolDef[] = [
       risk: "low",
       preview: { kind: "fields", record: `Deal · ${i.deal_name ?? i.deal_id}`, changes: i.changes.map((c) => ({ field: c.field, from: c.from ?? "—", to: c.to })) },
     }),
-    execute: (input, ctx) => runConnector("hubspot.deals.update", input, ctx, () => "Deal updated"),
+    execute: (input, ctx) => runConnector("hubspot", "hubspot.deals.update", input, ctx, () => "Deal updated"),
   },
   {
     name: "gmail_send",
@@ -189,7 +192,7 @@ export const TOOLS: ToolDef[] = [
       return { recipients: i.to.length, external_recipients: ext.length, recipient_domains: [...new Set(i.to.map(emailDomain))] };
     },
     approval: (i: { to: string[]; subject: string; body: string }) => ({ title: `Send email: ${i.subject.slice(0, 60)}`, risk: "medium", preview: { kind: "email", to: i.to, subject: i.subject, body: i.body } }),
-    execute: (input, ctx) => runConnector("gmail.send", input, ctx, () => `Sent to ${(input.to as string[]).length} recipient(s)`),
+    execute: (input, ctx) => runConnector("gmail", "gmail.send", input, ctx, () => `Sent to ${(input.to as string[]).length} recipient(s)`),
   },
   {
     name: "slack_post_message",
@@ -201,7 +204,7 @@ export const TOOLS: ToolDef[] = [
     sideEffect: "write",
     needsConnection: true,
     label: (i: { channel: string }) => `Posted to ${i.channel}`,
-    execute: (input, ctx) => runConnector("slack.post_message", input, ctx, () => `Posted to ${input.channel}`),
+    execute: (input, ctx) => runConnector("slack", "slack.post_message", input, ctx, () => `Posted to ${input.channel}`),
   },
   {
     name: "whatsapp_send",
@@ -215,7 +218,7 @@ export const TOOLS: ToolDef[] = [
     label: (i: { to: string[] }) => `Sent WhatsApp to ${i.to.length} recipient(s)`,
     facts: (i: { to: string[] }) => ({ recipients: i.to.length }),
     approval: (i: { to: string[]; text: string }) => ({ title: `Send WhatsApp to ${i.to.length} recipient(s)`, risk: i.to.length > 50 ? "high" : "medium", preview: { kind: "email", to: i.to, subject: "WhatsApp message", body: i.text } }),
-    execute: (input, ctx) => runConnector("whatsapp.send", input, ctx, () => "Sent"),
+    execute: (input, ctx) => runConnector("whatsapp", "whatsapp.send", input, ctx, () => "Sent"),
   },
   {
     name: "razorpay_refund_create",
@@ -233,7 +236,60 @@ export const TOOLS: ToolDef[] = [
       risk: i.amount_inr > 5000 ? "high" : "medium",
       preview: { kind: "payment", payee: i.payee ?? "Customer", amount: `₹${i.amount_inr.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, reference: `${i.payment_id} · ${i.reason}` },
     }),
-    execute: (input, ctx) => runConnector("razorpay.refunds.create", input, ctx, (o) => `Refund ${o.refund_id}`),
+    execute: (input, ctx) => runConnector("razorpay", "razorpay.refunds.create", input, ctx, (o) => `Refund ${o.refund_id}`),
+  },
+
+  // ─── More connected-app tools ───
+  readTool({ name: "gmail_search", action: "gmail.messages.search", appId: "gmail", label: "Searched Gmail", description: "Search the user's Gmail (Gmail search syntax, e.g. 'from:vendor newer_than:7d invoice').", properties: { query: str("Gmail search query"), limit: { type: "number" } }, required: ["query"], summary: (o) => `${n(o.messages)} emails` }),
+  readTool({ name: "gdrive_search", action: "gdrive.files.search", appId: "gdrive", label: "Searched Google Drive", description: "Full-text search Google Drive files the user can access.", properties: { query: str("Words to find"), limit: { type: "number" } }, required: ["query"], summary: (o) => `${n(o.files)} files` }),
+  readTool({ name: "gsheets_read", action: "gsheets.values.get", appId: "gsheets", label: "Read Google Sheet", description: "Read a range from a Google Sheet.", properties: { spreadsheet_id: str("Spreadsheet id from its URL"), range: str("A1 range, e.g. Sheet1!A1:F200") }, required: ["spreadsheet_id"], summary: (o) => `${n(o.rows)} rows` }),
+  appTool({ name: "gsheets_append", action: "gsheets.values.append", appId: "gsheets", sideEffect: "write", label: "Appended rows to Google Sheet", description: "Append rows to a Google Sheet.", properties: { spreadsheet_id: str("Spreadsheet id"), range: str("Target sheet/range, e.g. Sheet1!A1"), rows: { type: "array", items: { type: "array", items: { type: "string" } } } }, required: ["spreadsheet_id", "rows"], summary: (o) => `${o.appended ?? 0} rows added` }),
+  readTool({ name: "outlook_search", action: "outlook.messages.search", appId: "outlook", label: "Searched Outlook mail", description: "Search the user's Outlook / Microsoft 365 mailbox.", properties: { query: str("Words to find"), limit: { type: "number" } }, required: ["query"], summary: (o) => `${n(o.messages)} emails` }),
+  readTool({ name: "slack_channels_list", action: "slack.channels.list", appId: "slack", label: "Listed Slack channels", description: "List public Slack channels (to find where to post).", properties: {}, summary: (o) => `${n(o.channels)} channels` }),
+  readTool({ name: "salesforce_query", action: "salesforce.query", appId: "salesforce", label: "Queried Salesforce", description: "Run a read-only SOQL SELECT query against Salesforce.", properties: { soql: str("SOQL SELECT query") }, required: ["soql"], summary: (o) => `${o.total ?? 0} records` }),
+  readTool({ name: "razorpay_payments_list", action: "razorpay.payments.list", appId: "razorpay", label: "Listed Razorpay payments", description: "List recent Razorpay payments with captured/failed totals.", properties: { range: str("e.g. last_7d") }, summary: (o) => `${o.count ?? 0} payments` }),
+  readTool({ name: "stripe_payments_list", action: "stripe.payments.list", appId: "stripe", label: "Listed Stripe payments", description: "List recent Stripe payment intents with totals.", properties: { range: str("e.g. last_7d") }, summary: (o) => `${o.count ?? 0} payments` }),
+  readTool({ name: "delhivery_track", action: "delhivery.track", appId: "delhivery", label: "Tracked Delhivery shipment", description: "Track Delhivery shipments by waybill/AWB number (comma-separate several).", properties: { waybill: str("AWB number(s)") }, required: ["waybill"], summary: (o) => `${n(o.shipments)} shipments` }),
+  readTool({ name: "freshdesk_tickets_search", action: "freshdesk.tickets.search", appId: "freshdesk", label: "Searched Freshdesk tickets", description: "Search Freshdesk tickets (Freshdesk query syntax, e.g. status:2).", properties: { query: str("Query") }, summary: (o) => `${o.total ?? 0} tickets` }),
+  readTool({ name: "intercom_conversations_search", action: "intercom.conversations.search", appId: "intercom", label: "Searched Intercom conversations", description: "List Intercom conversations by state.", properties: { state: { type: "string", enum: ["open", "closed", "snoozed"] } }, summary: (o) => `${o.total ?? 0} conversations` }),
+  readTool({ name: "mailchimp_campaigns", action: "mailchimp.campaigns.list", appId: "mailchimp", label: "Fetched Mailchimp campaigns", description: "Recent Mailchimp campaigns with open and click rates.", properties: {}, summary: (o) => `${n(o.campaigns)} campaigns` }),
+  readTool({ name: "notion_search", action: "notion.search", appId: "notion", label: "Searched Notion", description: "Search Notion pages and databases shared with Anvita.", properties: { query: str("Words to find") }, required: ["query"], summary: (o) => `${n(o.results)} pages` }),
+  readTool({ name: "github_issues_search", action: "github.issues.search", appId: "github", label: "Searched GitHub", description: "Search GitHub issues and PRs (GitHub search syntax, e.g. 'repo:org/app is:open label:bug').", properties: { query: str("Search query") }, required: ["query"], summary: (o) => `${o.total ?? 0} results` }),
+  appTool({ name: "github_issue_create", action: "github.issues.create", appId: "github", sideEffect: "write", label: (i: { repo: string; title: string }) => `Opened GitHub issue in ${i.repo}`, description: "Create a GitHub issue.", properties: { owner: str("Repo owner"), repo: str("Repo name"), title: str("Title"), body: str("Markdown body"), labels: { type: "array", items: { type: "string" } } }, required: ["owner", "repo", "title"], summary: (o) => `#${o.number ?? "?"}` }),
+  readTool({ name: "jira_issues_search", action: "jira.issues.search", appId: "jira", label: "Searched Jira", description: "Search Jira issues with JQL.", properties: { jql: str("JQL, e.g. project = OPS AND status != Done") }, summary: (o) => `${n(o.issues)} issues` }),
+  appTool({ name: "jira_issue_create", action: "jira.issues.create", appId: "jira", sideEffect: "write", label: (i: { project_key: string }) => `Created Jira issue in ${i.project_key}`, description: "Create a Jira issue.", properties: { project_key: str("Project key, e.g. OPS"), summary: str("Summary"), description: str("Description"), issue_type: str("Task, Bug, Story…") }, required: ["project_key", "summary"], summary: (o) => String(o.key ?? "created") }),
+  readTool({ name: "linear_issues_search", action: "linear.issues.search", appId: "linear", label: "Searched Linear", description: "Search Linear issues.", properties: { query: str("Words to find") }, required: ["query"], summary: (o) => `${n(o.issues)} issues` }),
+  readTool({ name: "okta_users_search", action: "okta.users.search", appId: "okta", label: "Looked up Okta users", description: "Find Okta users by name or email.", properties: { query: str("Name or email") }, required: ["query"], summary: (o) => `${n(o.users)} users` }),
+  {
+    name: "outlook_send",
+    action: "outlook.send",
+    appId: "outlook",
+    kind: "tool",
+    description: "Send an email from the user's Outlook / Microsoft 365 mailbox. Subject to workspace approval policies.",
+    inputSchema: { type: "object", properties: { to: { type: "array", items: { type: "string" } }, subject: str("Subject"), body: str("Plain-text body") }, required: ["to", "subject", "body"] },
+    sideEffect: "external",
+    needsConnection: true,
+    label: (i: { to: string[] }) => `Sent email to ${i.to.slice(0, 2).join(", ")}${i.to.length > 2 ? "…" : ""}`,
+    facts: (i: { to: string[] }, ctx) => {
+      const ext = i.to.filter((a) => !ctx.workspaceDomains.includes(emailDomain(a)));
+      return { recipients: i.to.length, external_recipients: ext.length, recipient_domains: [...new Set(i.to.map(emailDomain))] };
+    },
+    approval: (i: { to: string[]; subject: string; body: string }) => ({ title: `Send email: ${i.subject.slice(0, 60)}`, risk: "medium", preview: { kind: "email", to: i.to, subject: i.subject, body: i.body } }),
+    execute: (input, ctx) => runConnector("outlook", "outlook.send", input, ctx, () => `Sent to ${(input.to as string[]).length} recipient(s)`),
+  },
+  {
+    name: "stripe_refund_create",
+    action: "stripe.refunds.create",
+    appId: "stripe",
+    kind: "tool",
+    description: "Refund a Stripe payment intent (full, or partial with amount in the payment's currency).",
+    inputSchema: { type: "object", properties: { payment_id: str("PaymentIntent id (pi_…)"), amount: { type: "number" }, payee: str("Customer"), reason: str("Why") }, required: ["payment_id", "reason"] },
+    sideEffect: "external",
+    needsConnection: true,
+    label: (i: { amount?: number }) => (i.amount ? `Refunded ${i.amount}` : "Refunded payment"),
+    facts: (i: { amount?: number }) => ({ amount: i.amount ?? 0 }),
+    approval: (i: { payment_id: string; amount?: number; payee?: string; reason: string }) => ({ title: `Stripe refund${i.amount ? ` of ${i.amount}` : ""}`, risk: "high", preview: { kind: "payment", payee: i.payee ?? "Customer", amount: i.amount ? String(i.amount) : "Full amount", reference: `${i.payment_id} · ${i.reason}` } }),
+    execute: (input, ctx) => runConnector("stripe", "stripe.refunds.create", input, ctx, (o) => `Refund ${o.refund_id}`),
   },
 ];
 

@@ -1,3 +1,4 @@
+import type { Credentials } from "../../connectors/types.js";
 import type { Facts } from "../policy.js";
 
 export type SideEffect = "none" | "write" | "external" | "destructive";
@@ -10,8 +11,8 @@ export interface ToolContext {
   actor: { type: "agent" | "worker"; name: string };
   onBehalfOf: { userId: string | null; name: string };
   workspaceDomains: string[];
-  /** Decrypted connection credentials for the tool's app (never shown to the model). */
-  credentials: Record<string, unknown> | null;
+  /** The tool app's connection with decrypted credentials (never shown to the model). Null → demo driver. */
+  connection: { id: string | null; credentials: Credentials } | null;
 }
 
 export interface ToolResult {
