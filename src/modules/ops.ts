@@ -6,7 +6,7 @@ import { approvals, creditLedger, inboxConversations, messages, payments, runs, 
 import { sendToChannel } from "../channels/deliver.js";
 import { AppError, assertFound, badRequest, conflict } from "../lib/errors.js";
 import { config } from "../config.js";
-import { createCheckout, markPaid, providers, verifyRazorpayPayment } from "../services/payments.js";
+import { basePrice, createCheckout, discountFor, markPaid, PACKS, priceFor, providers, verifyRazorpayPayment } from "../services/payments.js";
 import { newId } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
@@ -29,7 +29,18 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
     return { data: rows.map((r) => ({ id: r.id, delta: r.delta, reason: r.reason, refType: r.refType, refId: r.refId, createdAt: r.createdAt.toISOString() })) };
   });
 
-  app.get("/billing/providers", { preHandler: app.authorize("workspace:read"), schema: { tags: ["billing"] } }, async () => ({ ...providers(), pricePer1000: config.CREDITS_PRICE_PER_1000, currency: config.BILLING_CURRENCY }));
+  app.get("/billing/providers", { preHandler: app.authorize("workspace:read"), schema: { tags: ["billing"] } }, async () => ({
+    ...providers(),
+    pricePer1000: config.CREDITS_PRICE_PER_1000,
+    currency: config.BILLING_CURRENCY,
+    taxRate: config.BILLING_TAX_RATE,
+    packs: PACKS.map((credits) => ({ credits, price: basePrice(credits), total: priceFor(credits) / 100, discount: discountFor(credits) })),
+  }));
+
+  app.get("/billing/payments", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"] } }, async (req) => {
+    const rows = await db.select().from(payments).where(eq(payments.workspaceId, auth(req).workspaceId)).orderBy(desc(payments.createdAt)).limit(100);
+    return { data: rows.map((p) => ({ id: p.id, provider: p.provider, credits: p.credits, amount: p.amount / 100, currency: p.currency, status: p.status, createdAt: p.createdAt.toISOString(), paidAt: p.paidAt?.toISOString() ?? null })) };
+  });
 
   /** Start a credit purchase: a Razorpay order (complete it with Checkout, then /billing/razorpay/verify) or a Stripe Checkout URL. */
   app.post("/billing/checkout", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], body: z.object({ credits: z.number().int().min(1000).max(10_000_000), provider: z.enum(["razorpay", "stripe"]).optional() }) } }, async (req) => {

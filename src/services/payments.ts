@@ -11,7 +11,13 @@ import { publish } from "./events.js";
 
 export const providers = () => ({ razorpay: !!(config.RAZORPAY_KEY_ID && config.RAZORPAY_KEY_SECRET), stripe: !!config.STRIPE_SECRET_KEY });
 
-export const priceFor = (credits: number) => Math.round((credits / 1000) * config.CREDITS_PRICE_PER_1000 * 100);
+/** Volume discount: 10% off from 1 lakh credits, 20% off from 2.5 lakh. */
+export const discountFor = (credits: number) => (credits >= 250_000 ? 0.2 : credits >= 100_000 ? 0.1 : 0);
+/** Price before tax, in the currency's major unit. */
+export const basePrice = (credits: number) => Math.round((credits / 1000) * config.CREDITS_PRICE_PER_1000 * (1 - discountFor(credits)));
+/** Amount charged (incl. tax) in the minor unit. */
+export const priceFor = (credits: number) => Math.round(basePrice(credits) * (1 + config.BILLING_TAX_RATE) * 100);
+export const PACKS = [50_000, 100_000, 250_000];
 
 async function providerFetch<T>(url: string, init: { auth: string; form?: Record<string, string>; json?: unknown }): Promise<T> {
   const res = await fetch(url, {

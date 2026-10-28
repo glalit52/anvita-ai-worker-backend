@@ -56,6 +56,8 @@ const schema = z.object({
   /** Price of 1,000 credits in the smallest currency unit's major unit (₹100 by default). */
   CREDITS_PRICE_PER_1000: z.coerce.number().default(100),
   BILLING_CURRENCY: z.string().default("INR"),
+  /** Tax added at checkout (18% GST in India). */
+  BILLING_TAX_RATE: z.coerce.number().min(0).max(1).default(0.18),
   /** Signing secret of the Anvita Slack app (Events API). */
   SLACK_SIGNING_SECRET: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),

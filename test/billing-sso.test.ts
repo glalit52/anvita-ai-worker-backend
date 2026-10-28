@@ -34,12 +34,12 @@ describe("payments", () => {
     mock.get("https://api.razorpay.com").intercept({ path: "/v1/orders", method: "POST" }).reply((o) => ((orderBody = JSON.parse(String(o.body))), { statusCode: 200, data: { id: "order_1" }, responseOptions: json }));
     const s = await signup(ctx.app);
     const api = client(ctx.app, s);
-    expect((await api.get("/v1/billing/providers")).body).toMatchObject({ razorpay: true, stripe: true, pricePer1000: 100 });
+    expect((await api.get("/v1/billing/providers")).body).toMatchObject({ razorpay: true, stripe: true, pricePer1000: 100, packs: [{ credits: 50000, price: 5000, total: 5900 }, { credits: 100000, price: 9000 }, { credits: 250000, price: 20000, total: 23600 }] });
     const before = (await api.get("/v1/billing")).body.creditsTotal;
 
     const co = await api.post("/v1/billing/checkout", { credits: 50000, provider: "razorpay" });
-    expect(co.body).toMatchObject({ provider: "razorpay", orderId: "order_1", keyId: "rzp_test_key", amount: 500000, currency: "INR" });
-    expect(orderBody).toMatchObject({ amount: 500000, currency: "INR" });
+    expect(co.body).toMatchObject({ provider: "razorpay", orderId: "order_1", keyId: "rzp_test_key", amount: 590000, currency: "INR" });
+    expect(orderBody).toMatchObject({ amount: 590000, currency: "INR" });
 
     expect((await api.post("/v1/billing/razorpay/verify", { orderId: "order_1", paymentId: "pay_x", signature: "bad" })).status).toBe(400);
     const ok = await api.post("/v1/billing/razorpay/verify", { orderId: "order_1", paymentId: "pay_x", signature: hmacSha256("rzp_secret", "order_1|pay_x") });
@@ -61,8 +61,9 @@ describe("payments", () => {
     const api = client(ctx.app, s);
     const before = (await api.get("/v1/billing")).body.creditsTotal;
     const co = await api.post("/v1/billing/checkout", { credits: 10000, provider: "stripe" });
-    expect(co.body).toMatchObject({ provider: "stripe", url: "https://checkout.stripe.com/c/cs_1", amount: 100000 });
-    expect(decodeURIComponent(form)).toContain("line_items[0][price_data][unit_amount]=100000");
+    expect(co.body).toMatchObject({ provider: "stripe", url: "https://checkout.stripe.com/c/cs_1", amount: 118000 });
+    expect(decodeURIComponent(form)).toContain("line_items[0][price_data][unit_amount]=118000");
+    expect((await api.get("/v1/billing/payments")).body.data[0]).toMatchObject({ provider: "stripe", credits: 10000, status: "created" });
 
     const event = { type: "checkout.session.completed", data: { object: { id: "cs_1", payment_status: "paid" } } };
     const t = Math.floor(Date.now() / 1000);
