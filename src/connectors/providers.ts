@@ -29,13 +29,29 @@ export const CONNECTORS: AppConnector[] = [
   // ─── Google Workspace ───
   { appId: "gmail", oauth: GOOGLE(["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.readonly"]), headers: bearer, test: async (call) => `Connected as ${(await call<{ emailAddress: string }>("https://gmail.googleapis.com/gmail/v1/users/me/profile")).emailAddress}` },
   { appId: "gdrive", oauth: GOOGLE(["https://www.googleapis.com/auth/drive.readonly"]), headers: bearer, test: async (call) => `Connected as ${(await call<{ user: { emailAddress: string } }>("https://www.googleapis.com/drive/v3/about?fields=user")).user.emailAddress}` },
-  { appId: "gcal", oauth: GOOGLE(["https://www.googleapis.com/auth/calendar.readonly"]), headers: bearer, test: async (call) => `Calendar ${(await call<{ summary: string }>("https://www.googleapis.com/calendar/v3/calendars/primary")).summary}` },
+  { appId: "gcal", oauth: GOOGLE(["https://www.googleapis.com/auth/calendar.events"]), headers: bearer, test: async (call) => `Calendar ${(await call<{ summary: string }>("https://www.googleapis.com/calendar/v3/calendars/primary")).summary}` },
   { appId: "gsheets", oauth: GOOGLE(["https://www.googleapis.com/auth/spreadsheets"]), headers: bearer },
+  {
+    appId: "googleads",
+    // Google Ads also needs the server's developer token (GOOGLE_ADS_DEVELOPER_TOKEN).
+    oauth: { ...GOOGLE(["https://www.googleapis.com/auth/adwords"])!, needs: [{ key: "customer_id", label: "Google Ads customer ID", placeholder: "123-456-7890" }, { key: "login_customer_id", label: "Manager (MCC) account ID", placeholder: "optional", optional: true }] },
+    headers: (c) => ({ ...bearer(c), "developer-token": process.env.GOOGLE_ADS_DEVELOPER_TOKEN ?? "", ...(c.extra?.login_customer_id ? { "login-customer-id": c.extra.login_customer_id.replace(/\D/g, "") } : {}) }),
+    test: async (call) => {
+      const r = await call<{ results?: { customer: { descriptiveName: string; currencyCode: string } }[] }>("https://googleads.googleapis.com/v21/customers/{customer_id}/googleAds:search", { body: { query: "SELECT customer.descriptive_name, customer.currency_code FROM customer LIMIT 1" } });
+      return `Account ${r.results?.[0]?.customer.descriptiveName ?? "connected"}`;
+    },
+  },
+  {
+    appId: "bigquery",
+    oauth: { ...GOOGLE(["https://www.googleapis.com/auth/bigquery.readonly"])!, needs: [{ key: "project_id", label: "Google Cloud project ID", placeholder: "kesar-analytics" }] },
+    headers: bearer,
+    test: async (call) => `Project ${(await call<{ datasets?: unknown[] }>("https://bigquery.googleapis.com/bigquery/v2/projects/{project_id}/datasets?maxResults=1")).datasets ? "has datasets" : "connected"}`,
+  },
   { appId: "ga4", oauth: { ...GOOGLE(["https://www.googleapis.com/auth/analytics.readonly"])!, needs: [{ key: "propertyId", label: "GA4 property ID", placeholder: "123456789" }] }, headers: bearer },
 
   // ─── Microsoft 365 ───
   { appId: "outlook", oauth: MICROSOFT(["Mail.Send", "Mail.Read", "Calendars.Read"]), headers: bearer, test: async (call) => `Connected as ${(await call<{ userPrincipalName: string }>("https://graph.microsoft.com/v1.0/me")).userPrincipalName}` },
-  { appId: "teams", oauth: MICROSOFT(["ChannelMessage.Send", "Team.ReadBasic.All", "Channel.ReadBasic.All"]), headers: bearer },
+  { appId: "teams", oauth: MICROSOFT(["ChannelMessage.Send", "Team.ReadBasic.All", "Channel.ReadBasic.All", "Chat.ReadWrite"]), headers: bearer, test: async (call) => `Member of ${(await call<{ value: unknown[] }>("https://graph.microsoft.com/v1.0/me/joinedTeams")).value.length} teams` },
 
   // ─── Communication ───
   {
@@ -136,6 +152,94 @@ export const CONNECTORS: AppConnector[] = [
     headers: (c) => ({ Authorization: `Token ${c.fields?.token ?? ""}` }),
   },
 
+  {
+    appId: "tally",
+    // Tally Prime's XML server runs on-prem (port 9000). Expose it to Anvita through a secure tunnel or the Tally gateway.
+    apiKey: {
+      fields: [
+        { key: "url", label: "Tally gateway URL", placeholder: "https://tally.kesarfoods.in" },
+        { key: "company", label: "Company name in Tally", placeholder: "Kesar Foods Pvt Ltd" },
+        { key: "username", label: "Gateway username", optional: true },
+        { key: "password", label: "Gateway password", secret: true, optional: true },
+      ],
+      help: "Enable Tally Prime's HTTP server (F1 → Settings → Connectivity → port 9000) and publish it through an authenticated HTTPS tunnel; paste that URL here.",
+    },
+    headers: (c) => ({ "Content-Type": "text/xml", ...(c.fields?.username ? basic(c.fields.username, c.fields.password ?? "") : {}) }),
+    test: async (call) => {
+      const xml = await call<string>("{url}", { method: "POST", raw: `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>CompanyList</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="CompanyList"><TYPE>Company</TYPE><FETCH>NAME</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`, headers: { Accept: "text/xml" } });
+      const names = [...String(xml).matchAll(/<COMPANY NAME="([^"]+)"/g)].map((m) => m[1]);
+      return names.length ? `Companies: ${names.slice(0, 3).join(", ")}` : "Tally reachable";
+    },
+  },
+  {
+    appId: "quickbooks",
+    oauth: { env: "QUICKBOOKS", authorizeUrl: () => "https://appcenter.intuit.com/connect/oauth2", tokenUrl: () => "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer", scopes: ["com.intuit.quickbooks.accounting"], tokenAuth: "basic" },
+    headers: bearer,
+    test: async (call) => `Company ${(await call<{ CompanyInfo: { CompanyName: string } }>(`${qbBase()}/v3/company/{realmId}/companyinfo/{realmId}?minorversion=75`)).CompanyInfo.CompanyName}`,
+  },
+  {
+    appId: "zoho",
+    // Data centre comes from ZOHO_ACCOUNTS_URL (accounts.zoho.in for India); the API domain is returned with the token.
+    oauth: {
+      env: "ZOHO",
+      authorizeUrl: () => `${process.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.in"}/oauth/v2/auth`,
+      tokenUrl: () => `${process.env.ZOHO_ACCOUNTS_URL ?? "https://accounts.zoho.in"}/oauth/v2/token`,
+      scopes: ["ZohoCRM.modules.ALL", "ZohoCRM.settings.READ", "ZohoBooks.invoices.READ", "ZohoBooks.bills.CREATE", "ZohoBooks.settings.READ"],
+      scopeSeparator: ",",
+      extraAuthParams: { access_type: "offline", prompt: "consent" },
+      extract: (t) => ({ apiDomain: String(t.api_domain ?? "https://www.zohoapis.in") }),
+    },
+    headers: (c) => ({ Authorization: `Zoho-oauthtoken ${c.accessToken ?? ""}` }),
+    test: async (call) => `Org ${(await call<{ org: { company_name: string }[] }>("{apiDomain}/crm/v6/org")).org[0]?.company_name ?? "connected"}`,
+  },
+  {
+    appId: "darwinbox",
+    apiKey: {
+      fields: [
+        { key: "domain", label: "Darwinbox domain", placeholder: "kesarfoods.darwinbox.in" },
+        { key: "username", label: "API username" },
+        { key: "password", label: "API password", secret: true },
+        { key: "api_key", label: "API key", secret: true },
+        { key: "dataset_key", label: "Employee dataset key", secret: true },
+      ],
+      help: "Darwinbox → Settings → Integrations → API: create API credentials and an employee master dataset.",
+    },
+    headers: (c) => basic(c.fields?.username ?? "", c.fields?.password ?? ""),
+    test: async (call, get) => {
+      const r = await call<{ status?: number | string; employee_data?: unknown[]; message?: string }>("https://{domain}/masterapi/employee", { body: { api_key: get("api_key"), datasetKey: get("dataset_key") } });
+      if (!Array.isArray(r.employee_data)) throw new ConnectorError(r.message ?? "Darwinbox rejected the API key or dataset key");
+      return `${r.employee_data.length} employees visible`;
+    },
+  },
+  {
+    appId: "workday",
+    // Workday API client (refresh token grant): the driver exchanges the refresh token per call.
+    apiKey: {
+      fields: [
+        { key: "host", label: "Workday REST host", placeholder: "wd2-impl-services1.workday.com" },
+        { key: "tenant", label: "Tenant", placeholder: "kesarfoods" },
+        { key: "client_id", label: "API client ID" },
+        { key: "client_secret", label: "API client secret", secret: true },
+        { key: "refresh_token", label: "Refresh token", secret: true },
+      ],
+      help: "Workday → Register API Client for Integrations (scopes: Staffing, Worker Data), then generate a non-expiring refresh token.",
+    },
+    headers: () => ({}),
+    dynamicHeaders: async (c) => ({ Authorization: `Bearer ${await workdayToken(c)}` }),
+    test: async (call) => `${(await call<{ total?: number }>("https://{host}/ccx/api/staffing/v6/{tenant}/workers?limit=1")).total ?? 0} workers`,
+  },
+  {
+    appId: "postgres",
+    // Read-only SQL over a direct connection (use a read-only role). The URL never reaches the model.
+    apiKey: { fields: [{ key: "dsn", label: "Connection URL", secret: true, placeholder: "postgres://readonly:…@db.example.com:5432/app?sslmode=require" }], help: "Create a read-only database role and paste its connection URL. Anvita runs SELECT queries in read-only transactions with a timeout." },
+    headers: () => ({}),
+    test: async (_call, get) => {
+      const { pgQuery } = await import("./drivers/data.js");
+      const r = await pgQuery(get("dsn") ?? "", "select current_database() as db, version() as version", 1);
+      return `Database ${String(r.rows[0]?.db ?? "")}`;
+    },
+  },
+
   // ─── Marketing ───
   {
     appId: "metaads",
@@ -181,6 +285,27 @@ export const CONNECTORS: AppConnector[] = [
     headers: (c) => ({ Authorization: `SSWS ${c.fields?.token ?? ""}` }),
   },
 ];
+
+const workdayTokens = new Map<string, { token: string; exp: number }>();
+/** Exchange the Workday refresh token for an access token (cached until shortly before expiry). */
+async function workdayToken(c: Credentials): Promise<string> {
+  const f = c.fields ?? {};
+  const key = `${f.host}|${f.tenant}|${f.client_id}`;
+  const hit = workdayTokens.get(key);
+  if (hit && hit.exp > Date.now() + 30_000) return hit.token;
+  const res = await fetch(`https://${host(f.host)}/ccx/oauth2/${encodeURIComponent(f.tenant ?? "")}/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Basic ${Buffer.from(`${f.client_id}:${f.client_secret}`).toString("base64")}` },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: f.refresh_token ?? "" }).toString(),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const data = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; error?: string };
+  if (!res.ok || !data.access_token) throw new ConnectorError(`Workday token request failed: ${data.error ?? res.status}`, 401);
+  workdayTokens.set(key, { token: data.access_token, exp: Date.now() + (data.expires_in ?? 3600) * 1000 });
+  return data.access_token;
+}
+
+export const qbBase = () => (process.env.QUICKBOOKS_ENV === "sandbox" ? "https://sandbox-quickbooks.api.intuit.com" : "https://quickbooks.api.intuit.com");
 
 export const connectorFor = (appId: string) => CONNECTORS.find((c) => c.appId === appId);
 

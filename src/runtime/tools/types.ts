@@ -22,6 +22,8 @@ export interface ToolResult {
   summary: string;
   credits?: number;
   artifactId?: string;
+  /** Several files (e.g. everything a sandbox run wrote to out/). */
+  artifactIds?: string[];
   sources?: { title: string; appId: string }[];
 }
 

@@ -52,6 +52,45 @@ export function demoData(action: string, input: Record<string, unknown>): Record
     case "whatsapp.send":
     case "slack.post_message":
       return { ...base, sent: true, id: `msg_${Math.floor(r() * 1e10).toString(36)}` };
+    case "shopify.orders.get":
+      return { ...base, found: true, order: String(input.order ?? input.order_id ?? "#1042"), payment: "paid", fulfillment: pick(["fulfilled", "unfulfilled", "partial"]), total: n(600, 6000), currency: "INR", items: [{ title: pick(PRODUCTS), qty: n(1, 3), price: n(300, 2000) }], tracking: { courier: "Delhivery", awb: `14${n(10_000_000, 99_999_999)}`, status: pick(["in_transit", "out_for_delivery", "delivered"]) }, ship_to: { city: pick(CITIES) } };
+    case "shopify.products.search":
+      return { ...base, total: 4, variants: PRODUCTS.slice(0, 4).map((p) => ({ product: p, sku: `KF-${n(100, 999)}`, price: n(250, 2500), stock: n(0, 40) })) };
+    case "shopify.customers.search":
+      return { ...base, total: 1, customers: [{ id: n(1000, 9999), name: "Meera Iyer", email: "meera@example.com", orders: n(1, 12), total_spent: n(2000, 40_000) }] };
+    case "hubspot.contacts.search":
+      return { ...base, total: 3, contacts: ["Ananya Rao", "Vikram Shah", "Sara Thomas"].map((name, i) => ({ id: `c_${200 + i}`, name, email: `${name.split(" ")[0].toLowerCase()}@${pick(COMPANIES).toLowerCase().replace(/\s/g, "")}.com`, company: pick(COMPANIES), title: pick(["Head of Procurement", "Admin Manager", "HR Lead"]), stage: "lead" })) };
+    case "tally.ledgers.list":
+      return { ...base, total: 3, ledgers: [{ name: "Sharma Packaging Pvt Ltd", group: "Sundry Creditors", closing_balance: -n(50_000, 300_000) }, { name: "Purchase @18%", group: "Purchase Accounts", closing_balance: n(500_000, 2_000_000) }, { name: "Input IGST", group: "Duties & Taxes", closing_balance: n(50_000, 200_000) }] };
+    case "tally.vouchers.create":
+    case "quickbooks.bills.create":
+      return { ...base, created: true, voucher_id: `V${n(1000, 9999)}` };
+    case "quickbooks.query":
+    case "zoho.records.search":
+    case "postgres.query":
+    case "bigquery.query":
+      return { ...base, total: 3, rows: Array.from({ length: 3 }, (_, i) => ({ id: i + 1, name: pick(COMPANIES), amount: n(10_000, 200_000) })) };
+    case "zoho.books.invoices.list":
+      return { ...base, total: 3, outstanding: n(100_000, 600_000), invoices: Array.from({ length: 3 }, (_, i) => ({ number: `INV-${2400 + i}`, customer: pick(COMPANIES), status: "overdue", due_date: `2026-10-${String(n(1, 20)).padStart(2, "0")}`, balance: n(20_000, 200_000) })) };
+    case "darwinbox.employees.search":
+    case "workday.workers.search":
+      return { ...base, total: 2, employees: [{ employee_id: "KF1042", name: "Arjun Nair", email: "arjun@kesarfoods.in", department: "Sales", date_of_joining: "2026-11-03" }, { employee_id: "KF1043", name: "Divya Menon", email: "divya@kesarfoods.in", department: "Finance", date_of_joining: "2026-11-03" }] };
+    case "teams.channels.list":
+      return { ...base, channels: [{ team: "Kesar Foods", channel: "General" }, { team: "Kesar Foods", channel: "Finance" }] };
+    case "razorpay.payment_links.create":
+      return { ...base, id: `plink_${Math.floor(r() * 1e10).toString(36)}`, url: "https://rzp.io/i/demo", status: "created", amount_inr: Number(input.amount_inr ?? 0) };
+    case "gcal.events.create":
+      return { ...base, created: true, id: `evt_${n(1000, 9999)}`, meet: "https://meet.google.com/demo-link" };
+    case "gcal.freebusy":
+      return { ...base, busy: { primary: { busy: [{ start: "2026-10-29T10:00:00+05:30", end: "2026-10-29T11:00:00+05:30" }] } } };
+    case "okta.users.reset_password":
+    case "okta.groups.add_user":
+    case "zendesk.tickets.update":
+    case "hubspot.contacts.update":
+    case "gmail.drafts.create":
+    case "teams.post_message":
+    case "whatsapp.send_template":
+      return { ...base, ok: true, done: true };
     default:
       return { ...base, ok: true };
   }

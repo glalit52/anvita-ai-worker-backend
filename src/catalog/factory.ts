@@ -1,7 +1,8 @@
 // Ported from the web app (apps/web/src/components/workers/factory.ts) so graphs are generated server-side.
 import type { InteractionType, Template, Thread, Worker, WorkerEdge, WorkerNode } from "../contracts/web.js";
-import { workers as seedWorkers } from "../db/seed-data/workers.js";
 import { appById } from "./index.js";
+import { TOOLS } from "../runtime/tools/index.js";
+import { workflowTemplateById } from "../workflow/templates.js";
 
 const uid = () => Math.random().toString(36).slice(2, 8);
 
@@ -78,34 +79,52 @@ export function graphFor(text: string, apps: string[], interaction: InteractionT
   const link = (a: string, b: string, label?: string) => edges.push({ id: `${a}-${b}`, source: a, target: b, label });
 
   const channelApp = apps.find((a) => ["whatsapp", "slack", "teams", "gmail"].includes(a));
-  const t = add({ kind: "trigger", title: triggerTitle(interaction, text), subtitle: interaction === "scheduled" ? "Schedule · Asia/Kolkata" : channelApp ? appById[channelApp]?.name : "Trigger", appId: interaction === "scheduled" ? undefined : channelApp });
+  const t = add({ kind: "trigger", title: triggerTitle(interaction, text), subtitle: interaction === "scheduled" ? "Schedule · Asia/Kolkata" : channelApp ? appById[channelApp]?.name : "Trigger", appId: interaction === "scheduled" ? undefined : channelApp, config: { triggerType: interaction === "scheduled" ? "schedule" : interaction === "api" ? "api" : interaction === "queue" ? "queue" : "channel" } });
   const toolApps = apps.filter((a) => a !== channelApp);
-  let prev = t;
-  for (const a of toolApps.slice(0, 2)) {
-    const id = add({ kind: "tool", title: `Fetch from ${appById[a]?.name ?? a}`, subtitle: `${a}.search`, appId: a, config: { action: `${a}.search`, sideEffect: "none" } });
-    link(prev, id);
-    prev = id;
-  }
-  const ag = add({ kind: "agent", title: "Understand & decide", subtitle: "Balanced (Sonnet)", config: { model: "Balanced (Sonnet)", instructions: text } });
-  link(prev, ag);
+  // Apps with a real read action get their own step; the rest become tools of the AI step.
+  const readable = toolApps.filter((a) => readAction(a)).slice(0, 3);
+  const agentTools = toolApps.filter((a) => !readable.includes(a) && !["web"].includes(a));
+  const reads = readable.map((a, i) => {
+    const action = readAction(a)!;
+    const id = add({ kind: "tool", title: `Fetch from ${appById[a]?.name ?? a}`, subtitle: action, appId: a, config: { action, sideEffect: "none" } }, (i - (readable.length - 1) / 2) * 240);
+    link(t, id);
+    y -= 130;
+    return id;
+  });
+  if (reads.length) y += 130;
+  const ag = add({ kind: "agent", title: "Understand & decide", subtitle: "Balanced (Sonnet)", config: { model: "Balanced (Sonnet)", instructions: text, tools: agentTools } });
+  for (const r of reads.length ? reads : [t]) link(r, ag);
   const needsApproval = /approv|refund|payment|send|email|post|over|above|>/i.test(text);
   let last = ag;
   if (needsApproval) {
-    const ap = add({ kind: "approval", title: "Human approval", subtitle: "Owner · 24h timeout", config: { approvers: "role:owner", timeout: "24h" } });
+    const ap = add({ kind: "approval", title: "Human approval", subtitle: "Owner · 24h timeout", config: { approvers: "Role: Owner", timeout: "24h", condition: "always" } });
     link(ag, ap);
     last = ap;
   }
-  const writeApp = toolApps[2] ?? toolApps[0];
-  if (writeApp && /create|update|post|refund|ticket|voucher|draft/i.test(text)) {
-    const w = add({ kind: "tool", title: `Write to ${appById[writeApp]?.name ?? writeApp}`, subtitle: `${writeApp}.create`, appId: writeApp, config: { action: `${writeApp}.create`, sideEffect: "write" } });
+  const writeApp = [toolApps[2], ...toolApps].find((a) => a && writeAction(a));
+  if (writeApp && /create|update|post|refund|ticket|voucher|draft|issue/i.test(text)) {
+    const action = writeAction(writeApp)!;
+    const w = add({ kind: "tool", title: `Write to ${appById[writeApp]?.name ?? writeApp}`, subtitle: action, appId: writeApp, config: { action, sideEffect: "write" } });
     link(last, w, needsApproval ? "approved" : undefined);
     last = w;
   }
-  const s = add({ kind: "send", title: channelApp ? `Reply on ${appById[channelApp]?.name}` : "Send summary", subtitle: channelApp ? "Same channel" : "Slack + email", appId: channelApp ?? "slack" });
-  link(last, s);
+  const slackChannel = /#[\w-]+/.exec(text)?.[0];
+  const email = /[\w.+-]+@[\w-]+\.[\w.]+/.exec(text)?.[0];
+  const sendCfg = channelApp && interaction !== "scheduled" ? { channel: "reply" } : email ? { channel: "gmail", to: email, subject: titleFrom(text) } : { channel: "slack", to: slackChannel ?? "#general" };
+  const sendApp = sendCfg.channel === "reply" ? channelApp : sendCfg.channel;
+  const s = add({ kind: "send", title: sendCfg.channel === "reply" ? `Reply on ${appById[channelApp!]?.name}` : `Send to ${sendCfg.to}`, subtitle: sendCfg.channel === "reply" ? "Same channel" : appById[sendApp ?? ""]?.name, appId: sendApp, config: sendCfg });
+  link(last, s, needsApproval && last !== ag && !writeApp ? "approved" : undefined);
   const e = add({ kind: "end", title: "Log outcome" });
   link(s, e);
   return { nodes, edges };
+}
+
+/** The first real read / write action an app offers (from the tool registry). */
+export function readAction(appId: string) {
+  return TOOLS.find((t) => t.appId === appId && t.kind === "tool" && t.sideEffect === "none")?.action;
+}
+export function writeAction(appId: string) {
+  return TOOLS.find((t) => t.appId === appId && t.kind === "tool" && t.sideEffect !== "none")?.action;
 }
 
 function base(partial: Partial<Worker> & Pick<Worker, "name" | "description" | "interaction" | "nodes" | "edges" | "apps">, owner: string): Worker {
@@ -146,12 +165,10 @@ export function workerFromDescription(text: string, owner: string): Worker {
   );
 }
 
-const templateSeed: Record<string, string> = { "tpl-support": "support", "tpl-report": "growth-report", "tpl-invoice": "invoices", "tpl-it": "it-voice", "tpl-sdr": "sdr", "tpl-onboard": "onboarding" };
-
 export function workerFromTemplate(tpl: Template, owner: string): Worker {
-  const seed = seedWorkers.find((w) => w.id === templateSeed[tpl.id]);
-  const graph = seed ? { nodes: seed.nodes, edges: seed.edges } : graphFor(tpl.description, tpl.apps, tpl.interaction);
-  return base(
+  const wf = workflowTemplateById[tpl.id];
+  const graph = wf ? { nodes: structuredClone(wf.nodes), edges: structuredClone(wf.edges) } : graphFor(tpl.description, tpl.apps, tpl.interaction);
+  const w = base(
     {
       name: tpl.name,
       description: tpl.description,
@@ -159,13 +176,14 @@ export function workerFromTemplate(tpl: Template, owner: string): Worker {
       color: tpl.color,
       interaction: tpl.interaction,
       apps: tpl.apps,
-      channels: seed?.channels ?? [],
-      trigger: seed?.trigger ?? graph.nodes[0]?.title ?? "Manual",
+      channels: wf?.channels ?? [],
+      trigger: wf?.trigger ?? graph.nodes[0]?.title ?? "Manual",
       ...graph,
       createdFrom: "template",
     },
     owner,
   );
+  return wf?.instructions ? Object.assign(w, { instructions: wf.instructions }) : w;
 }
 
 export function workerFromThread(thread: Thread, owner: string): Worker {
@@ -206,8 +224,9 @@ export function compileThread(thread: Thread, name: string, owner: string, sched
   };
   const trigger = push({ kind: "trigger", title: schedule, subtitle: "Schedule · Asia/Kolkata", config: { cron: "0 9 * * MON", timezone: "Asia/Kolkata" } });
   const tools = steps.filter((s) => s.kind === "tool" && s.appId);
-  const toolIds = tools.map((s, i) => push({ kind: "tool", title: s.label.replace(/^(Fetched|Searched|Queried|Pulled|Exported|Researched|Checked)\s+/i, ""), subtitle: `${s.appId}.read({{inputs.range}})`, appId: s.appId, config: { action: `${s.appId}.read`, sideEffect: "none" } }, (i - (tools.length - 1) / 2) * 260, false));
-  if (tools.length) y += 140;
+  const readable = tools.filter((s) => readAction(s.appId!));
+  const toolIds = readable.map((s, i) => push({ kind: "tool", title: s.label.replace(/^(Fetched|Searched|Queried|Pulled|Exported|Researched|Checked)\s+/i, ""), subtitle: readAction(s.appId!), appId: s.appId, config: { action: readAction(s.appId!)!, sideEffect: "none", range: "{{ trigger.range ?? 'last_7d' }}" } }, (i - (readable.length - 1) / 2) * 260, false));
+  if (readable.length) y += 140;
   toolIds.forEach((id) => edges.push({ id: `${trigger}-${id}`, source: trigger, target: id }));
   const code = push({ kind: "code", title: "Analysis script (frozen)", subtitle: "Compiled from this run · no LLM cost", appId: "sandbox", config: { language: "python", frozen: true } });
   (toolIds.length ? toolIds : [trigger]).forEach((id) => edges.push({ id: `${id}-${code}`, source: id, target: code }));
@@ -219,7 +238,7 @@ export function compileThread(thread: Thread, name: string, owner: string, sched
     edges.push({ id: `${last}-${ap}`, source: last, target: ap });
     last = ap;
   }
-  const send = push({ kind: "send", title: "Send results", subtitle: "Slack + email", appId: thread.channel === "slack" ? "slack" : "gmail" });
+  const send = push({ kind: "send", title: thread.channel === "slack" ? "Post results to #general" : "Email the results", subtitle: thread.channel === "slack" ? "Slack" : "Email", appId: thread.channel === "slack" ? "slack" : "gmail", config: thread.channel === "slack" ? { channel: "slack", to: "#general" } : { channel: "gmail", to: "{{ trigger.email ?? '' }}", subject: name } });
   edges.push({ id: `${last}-${send}`, source: last, target: send, label: hasApproval ? "approved" : undefined });
   const end = push({ kind: "end", title: "Done" });
   edges.push({ id: `${send}-${end}`, source: send, target: end });

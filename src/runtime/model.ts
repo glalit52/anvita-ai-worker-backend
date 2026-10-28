@@ -80,6 +80,7 @@ const KEYWORD_TOOLS: [RegExp, string, Record<string, unknown>][] = [
   [/\b(tickets?|support|zendesk|csat)/i, "zendesk_tickets_search", { query: "status:open" }],
   [/\b(calendar|meeting|schedule a)/i, "gcal_events_list", { days: 7 }],
   [/\b(policy|policies|refund rules|handbook|sop|how do (i|we))/i, "kb_search", {}],
+  [/\b(python|run code|calculate|compute|reconcile)\b/i, "run_code", { language: "python", code: "rows = inputs.get('rows', [120, 80, 45])\nfiles.csv('calculation.csv', [{'value': v} for v in rows])\nreturn {'total': sum(rows), 'count': len(rows)}", inputs: { rows: [120, 80, 45] } }],
 ];
 
 function firstUserText(messages: MessageParam[]): string {
@@ -105,8 +106,56 @@ function lastUserText(messages: MessageParam[]): string {
  * no API key is configured (local dev, CI, demos) so every runtime path — plans, connect cards,
  * approvals, artifacts — is exercised without network access.
  */
+/** Offline stand-in for structured workflow steps: fill a <json_schema> from keywords in the inputs. */
+function scriptedJson(call: ModelCall, text: string): string {
+  const raw = /<json_schema>([\s\S]*?)<\/json_schema>/.exec(call.system)?.[1] ?? "{}";
+  let schema: Record<string, unknown> = {};
+  try {
+    schema = JSON.parse(raw);
+  } catch {
+    schema = {};
+  }
+  // Prefer the triggering message over the whole workflow context.
+  const triggerText = /"text":"((?:[^"\\]|\\.)*)"/.exec(text)?.[1] ?? "";
+  const t = (triggerText || text).toLowerCase();
+  const out: Record<string, unknown> = {};
+  const guesses: Record<string, () => unknown> = {
+    intent: () => (/\b(human|person|agent|manager|someone real)\b/.test(t) ? "human" : /refund|return|money back|replace/.test(t) ? "return_refund" : /where|track|order|deliver|status|shipped/.test(t) ? "order_status" : /price|size|ingredient|product|stock/.test(t) ? "product_question" : "other"),
+    sentiment: () => (/angry|worst|terrible|useless|frustrat|disappoint|bad|!{2,}/.test(t) ? "negative" : /thank|great|love|awesome/.test(t) ? "positive" : "neutral"),
+    language: () => (/[\u0900-\u097f]/.test(text) ? "Hindi" : /[\u0b80-\u0bff]/.test(text) ? "Tamil" : "English"),
+    order_id: () => /#?\b(\d{4,})\b/.exec(text)?.[1] ?? null,
+    confidence: () => 0.97,
+    priority: () => (/urgent|asap|down|outage|critical/.test(t) ? "high" : "normal"),
+    eligible: () => !/(30|45|60) days|used|damaged by/.test(t),
+    decision: () => (/refund|return/.test(t) ? "approve" : "review"),
+    score: () => 72,
+    reply: () => "Thanks for reaching out — here's an update on your request.",
+    summary: () => `Summary: ${text.replace(/\s+/g, " ").slice(0, 160)}`,
+  };
+  for (const [key, specRaw] of Object.entries(schema)) {
+    const spec = String(specRaw).trim();
+    const optional = spec.endsWith("?");
+    const body = optional ? spec.slice(0, -1).trim() : spec;
+    const options = body.includes("|") ? body.split("|").map((x) => x.trim()) : null;
+    const k = key.toLowerCase();
+    let v: unknown = guesses[k]?.();
+    if (options) {
+      const hit = options.find((o) => String(v ?? "").toLowerCase() === o.toLowerCase()) ?? options.find((o) => t.includes(o.toLowerCase().replace(/_/g, " ")) || t.includes(o.toLowerCase()));
+      v = hit ?? options[options.length - 1];
+    } else if (v === undefined) {
+      v = /number|int|float|amount|count|total/.test(body.toLowerCase()) || /amount|count|total|score/.test(k) ? 0 : /bool/.test(body.toLowerCase()) ? false : optional ? null : `${key.replace(/_/g, " ")} (sample)`;
+    }
+    out[key] = v;
+  }
+  return JSON.stringify(out);
+}
+
 async function callScripted(call: ModelCall): Promise<ModelTurn> {
   const text = lastUserText(call.messages) || firstUserText(call.messages);
+  if (call.system.includes("<json_schema>")) {
+    const answer = scriptedJson(call, call.messages.map((m) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((b) => (b.type === "text" ? b.text : "")).join(" "))).join("\n"));
+    return { model: "scripted", content: [{ type: "text", text: answer, citations: null } as unknown as ContentBlock], stopReason: "end_turn", usage: { input_tokens: Math.ceil(JSON.stringify(call.messages).length / 4) + 400, output_tokens: Math.ceil(answer.length / 4) } };
+  }
   const assistantTurns = (() => {
     let n = 0;
     for (let i = call.messages.length - 1; i >= 0; i--) {
@@ -132,7 +181,7 @@ async function callScripted(call: ModelCall): Promise<ModelTurn> {
   if (wantsHuman) turns.push([{ name: "handoff_to_human", input: { reason: "Customer asked for a person", summary: text.slice(0, 300), sentiment: "negative" } }]);
   if (isTask && !wantsHuman) {
     const steps = [...reads.map((r) => `Get data via ${r.name.split("_")[0]}`), wantsArtifact ? `Build the ${wantsArtifact[1].toLowerCase()}` : "Write up the answer", ...(wantsEmail ? ["Send it (with your approval)"] : [])];
-    turns.push([{ name: "share_plan", input: { steps } }]);
+    if (available.has("share_plan")) turns.push([{ name: "share_plan", input: { steps } }]);
     if (reads.length) turns.push(reads);
     if (wantsArtifact) {
       const k = wantsArtifact[1].toLowerCase();
@@ -158,6 +207,8 @@ async function callScripted(call: ModelCall): Promise<ModelTurn> {
     ? "I've passed this to a teammate — they'll reply here shortly."
     : isTask
     ? `Done. Here's what I found:\n\n• **Top insight:** the last 7 days are up 12% vs the previous week.\n• **Watch out:** 3 items look unusual — I've flagged them${wantsArtifact ? " in the file" : " below"}.\n• **Next step:** I can keep tracking this and alert you if it moves more than 10%.${wantsEmail ? (rejected ? "\n\nOkay — I didn't send the email. The draft is saved if you change your mind." : "\n\n✅ Sent, and logged in the audit trail.") : ""}`
+    : text.startsWith("Step: ")
+    ? `${text.slice(6).split("\n")[0]}: done. Here's the update based on the information available — let me know if you need anything else.`
     : `Happy to help with that. ${text ? `You asked: “${text.slice(0, 120)}”. ` : ""}Tell me which apps or files to use and I'll get it done.`;
   for (const chunk of answer.match(/.{1,24}/gs) ?? []) call.onText?.(chunk);
   return { model: "scripted", content: [{ type: "text", text: answer, citations: null } as unknown as ContentBlock], stopReason: "end_turn", usage: { ...usage, output_tokens: Math.ceil(answer.length / 4) } };

@@ -143,7 +143,7 @@ export interface WorkerNode {
   appId?: string;
   x: number;
   y: number;
-  config?: Record<string, string | number | boolean | string[]>;
+  config?: Record<string, unknown>;
 }
 
 export interface WorkerEdge {

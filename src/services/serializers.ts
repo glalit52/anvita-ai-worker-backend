@@ -112,6 +112,7 @@ export function serializeWorker(w: typeof S.workers.$inferSelect, stats?: { runs
     pinned: w.pinned || undefined,
     nodes: w.nodes as C.WorkerNode[],
     edges: w.edges,
+    engine: w.engine,
     createdAt: w.createdAt.toISOString(),
     updatedAt: w.updatedAt.toISOString(),
   };

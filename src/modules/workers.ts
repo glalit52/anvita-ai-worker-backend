@@ -16,8 +16,35 @@ import { serializeEvalCase, serializeMessage, serializeQueueItem, serializeRun, 
 import { emitWebhook } from "../services/webhooks.js";
 import { parseCron, startWorkerRun, workerStats } from "../services/workers.js";
 import { publish } from "../services/events.js";
+import { AppError } from "../lib/errors.js";
+import { connections } from "../db/schema.js";
+import { workspaceRegistry } from "../runtime/tools/registry.js";
+import { sandboxAvailable } from "../sandbox/index.js";
+import { FUNCTION_NAMES } from "../workflow/expr.js";
+import { validateWorkflow } from "../workflow/validate.js";
 
-const node = z.object({ id: z.string(), kind: z.string(), title: z.string(), subtitle: z.string().optional(), appId: z.string().optional(), x: z.number(), y: z.number(), config: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string())])).optional() });
+type WorkerRow = typeof workers.$inferSelect;
+
+async function validateFor(workspaceId: string, w: WorkerRow, graph: { nodes: WorkerRow["nodes"]; edges: WorkerRow["edges"] }) {
+  const [registry, conns, all] = await Promise.all([
+    workspaceRegistry(workspaceId),
+    db.select({ appId: connections.appId, status: connections.status }).from(connections).where(eq(connections.workspaceId, workspaceId)),
+    db.select({ id: workers.id, name: workers.name }).from(workers).where(eq(workers.workspaceId, workspaceId)),
+  ]);
+  return validateWorkflow(graph, { registry, connectedApps: new Set(conns.filter((c) => c.status === "healthy").map((c) => c.appId)), workerIds: new Set(all.flatMap((x) => [x.id, x.name])), selfId: w.id });
+}
+
+const node = z.object({
+  id: z.string().min(1).max(64),
+  kind: z.string(),
+  title: z.string().max(200),
+  subtitle: z.string().max(500).optional(),
+  appId: z.string().optional(),
+  x: z.number(),
+  y: z.number(),
+  // Step settings: strings may hold {{ expressions }}; objects map tool inputs; code steps hold source.
+  config: z.record(z.string(), z.unknown()).refine((c) => JSON.stringify(c).length <= 200_000, "Step settings are too large").optional(),
+});
 const edge = z.object({ id: z.string(), source: z.string(), target: z.string(), label: z.string().optional() });
 const interaction = z.enum(["chat", "queue", "voice", "api", "document", "scheduled"]);
 const cron = z.string().refine((s) => {
@@ -43,6 +70,7 @@ const workerPatch = z.object({
   pinned: z.boolean().optional(),
   nodes: z.array(node).max(500).optional(),
   edges: z.array(edge).max(1000).optional(),
+  engine: z.enum(["graph", "agent"]).optional(),
 });
 
 function cronFromTrigger(w: Pick<Worker, "interaction" | "nodes">): string | null {
@@ -204,11 +232,36 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
     return reply.status(201).send(serializeWorker(copy));
   });
 
+  /** Check a graph (the saved one, or unsaved nodes/edges from the Studio) before running or publishing. */
+  app.post("/workers/:id/validate", { preHandler: app.authorize("workspace:read"), schema: { tags, params: idParam, body: z.object({ nodes: z.array(node).max(500).optional(), edges: z.array(edge).max(1000).optional() }).default({}) } }, async (req) => {
+    const a = auth(req);
+    const w = await loadWorker(a.workspaceId, req.params.id);
+    const issues = await validateFor(a.workspaceId, w, { nodes: (req.body.nodes as WorkerRow["nodes"]) ?? w.nodes, edges: req.body.edges ?? w.edges });
+    return { ok: !issues.some((i) => i.level === "error"), issues };
+  });
+
+  /** What the Studio can build with: step types, every action (with input schemas) and expression functions. */
+  app.get("/workflow/catalog", { preHandler: app.authorize("workspace:read"), schema: { tags } }, async (req) => {
+    const a = auth(req);
+    const reg = await workspaceRegistry(a.workspaceId);
+    return {
+      actions: reg.tools.filter((t) => t.kind !== "plan").map((t) => ({ action: t.action, name: t.name, appId: t.appId, kind: t.kind, description: t.description, sideEffect: t.sideEffect, inputSchema: t.inputSchema })),
+      functions: FUNCTION_NAMES,
+      channels: ["reply", "slack", "whatsapp", "gmail", "outlook", "teams", "webhook"],
+      sandbox: sandboxAvailable(),
+    };
+  });
+
   /** Publish: snapshot the current graph as an immutable version and go live. */
   app.post("/workers/:id/publish", { preHandler: app.authorize("workers:write"), schema: { tags, params: idParam, body: z.object({ note: z.string().max(500).optional(), canary: z.boolean().optional() }).default({}) } }, async (req) => {
     const a = auth(req);
     const w = await loadWorker(a.workspaceId, req.params.id);
     if (!w.nodes.some((n) => n.kind === "trigger")) throw badRequest("Add a trigger before publishing");
+    if (w.engine === "graph") {
+      const issues = await validateFor(a.workspaceId, w, { nodes: w.nodes, edges: w.edges });
+      const errors = issues.filter((i) => i.level === "error");
+      if (errors.length) throw new AppError(422, "workflow_invalid", `Fix ${errors.length} problem${errors.length > 1 ? "s" : ""} before publishing: ${errors[0].message}`, { issues });
+    }
     const version = w.version + 1;
     const { id: _id, workspaceId: _ws, createdAt: _c, updatedAt: _u, webhookSecret: _s, ...snapshot } = w;
     const updated = await db.transaction(async (tx) => {

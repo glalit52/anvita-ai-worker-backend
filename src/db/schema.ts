@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   bigserial,
   boolean,
   customType,
@@ -139,6 +140,35 @@ export const mcpServers = pgTable("mcp_servers", {
   createdAt: createdAt(),
 });
 
+export interface ApiOperation {
+  id: string;
+  method: string;
+  path: string;
+  summary: string;
+  params: { name: string; in: "path" | "query" | "header"; required: boolean; description?: string; schema?: Record<string, unknown> }[];
+  body?: Record<string, unknown> | null;
+  sideEffect: "none" | "write" | "external" | "destructive";
+  enabled: boolean;
+}
+
+/** Internal / third-party REST APIs imported from an OpenAPI spec and exposed as tools. */
+export const customApis = pgTable("custom_apis", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(),
+  baseUrl: text("base_url").notNull(),
+  authType: text("auth_type").$type<"none" | "bearer" | "header" | "query" | "basic">().notNull().default("none"),
+  /** Header or query parameter name for API-key auth. */
+  authName: text("auth_name"),
+  secretEnc: text("secret_enc"),
+  operations: jsonb("operations").$type<ApiOperation[]>().notNull().default([]),
+  enabled: boolean("enabled").notNull().default(true),
+  createdBy: text("created_by"),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+}, (t) => [uniqueIndex("custom_apis_ws_slug_uq").on(t.workspaceId, t.slug)]);
+
 // ─── Conversations & runs ──────────────────────────────────────────────────────
 
 export const threads = pgTable("threads", {
@@ -193,17 +223,20 @@ export const runs = pgTable("runs", {
   stepsCount: integer("steps_count").notNull().default(0),
   /** Assistant-message blocks already posted back to the originating channel (Slack/WhatsApp). */
   deliveredBlocks: integer("delivered_blocks").notNull().default(0),
+  /** Set when a workflow's Call Worker / Loop step started this run; the parent resumes when it ends. */
+  parentRunId: text("parent_run_id"),
+  parentNodeId: text("parent_node_id"),
   error: text("error"),
   startedAt: ts("started_at"),
   endedAt: ts("ended_at"),
   createdAt: createdAt(),
-}, (t) => [index("runs_ws_created_idx").on(t.workspaceId, t.createdAt), index("runs_worker_idx").on(t.workerId, t.createdAt)]);
+}, (t) => [index("runs_ws_created_idx").on(t.workspaceId, t.createdAt), index("runs_worker_idx").on(t.workerId, t.createdAt), index("runs_parent_idx").on(t.parentRunId)]);
 
 export const runSteps = pgTable("run_steps", {
   id: text("id").primaryKey(),
   runId: text("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
   workspaceId: text("workspace_id").notNull(),
-  seq: integer("seq").notNull(),
+  seq: bigint("seq", { mode: "number" }).notNull(),
   kind: text("kind").notNull(),
   name: text("name").notNull(),
   label: text("label").notNull(),
@@ -279,7 +312,7 @@ export interface WorkerNode {
   appId?: string;
   x: number;
   y: number;
-  config?: Record<string, string | number | boolean | string[]>;
+  config?: Record<string, unknown>;
 }
 export interface WorkerEdge { id: string; source: string; target: string; label?: string }
 
@@ -305,6 +338,8 @@ export const workers = pgTable("workers", {
   sourceRunId: text("source_run_id"),
   templateId: text("template_id"),
   pinned: boolean("pinned").notNull().default(false),
+  /** "graph" executes the Studio graph step by step (deterministic workflow); "agent" lets the model follow it as guidance. */
+  engine: text("engine").$type<"graph" | "agent">().notNull().default("graph"),
   nodes: jsonb("nodes").$type<WorkerNode[]>().notNull().default([]),
   edges: jsonb("edges").$type<WorkerEdge[]>().notNull().default([]),
   webhookSecret: text("webhook_secret"),

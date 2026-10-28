@@ -44,8 +44,10 @@ export interface AppConnector {
   apiKey?: { fields: FieldSpec[]; help: string };
   /** Build auth headers for API calls. */
   headers: (c: Credentials) => Record<string, string>;
+  /** Headers that need a network round-trip first (e.g. exchanging a refresh token per call). */
+  dynamicHeaders?: (c: Credentials) => Promise<Record<string, string>>;
   /** Cheap authenticated call proving the credentials work; returns a description (and optionally provider facts to keep). */
-  test?: (call: Caller) => Promise<string | { detail: string; extra: Record<string, string> }>;
+  test?: (call: Caller, get: (key: string) => string | undefined) => Promise<string | { detail: string; extra: Record<string, string> }>;
 }
 
 /** Authenticated HTTP for one connection (handles refresh, retries, JSON). */

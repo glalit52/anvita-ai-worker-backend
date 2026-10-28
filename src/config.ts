@@ -61,6 +61,19 @@ const schema = z.object({
   /** Signing secret of the Anvita Slack app (Events API). */
   SLACK_SIGNING_SECRET: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
+
+  /**
+   * Code sandbox. "docker" runs each step in a throwaway container (no network, read-only root,
+   * CPU/memory/pid limits) and is the default in production. "process" runs a local interpreter in
+   * a network-less user namespace with rlimits — for development only. "disabled" turns code off.
+   */
+  SANDBOX_PROVIDER: z.enum(["docker", "process", "disabled"]).optional(),
+  SANDBOX_IMAGE: z.string().default("anvita-sandbox:latest"),
+  SANDBOX_DOCKER_BIN: z.string().default("docker"),
+  SANDBOX_TIMEOUT_MS: z.coerce.number().int().default(120_000),
+  SANDBOX_MEMORY_MB: z.coerce.number().int().default(1024),
+  SANDBOX_CPUS: z.coerce.number().default(1),
+  SANDBOX_MAX_CONCURRENCY: z.coerce.number().int().default(4),
   EMAIL_FROM: z.string().default("Anvita <no-reply@anvita.ai>"),
 });
 
@@ -80,6 +93,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 }
 
 export const config = loadConfig();
+
+export function sandboxProvider(): "docker" | "process" | "disabled" {
+  return config.SANDBOX_PROVIDER ?? (config.NODE_ENV === "production" ? "docker" : "process");
+}
 
 export function modelProvider(): "anthropic" | "scripted" {
   return config.MODEL_PROVIDER ?? (config.ANTHROPIC_API_KEY ? "anthropic" : "scripted");

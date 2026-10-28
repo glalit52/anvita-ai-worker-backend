@@ -16,6 +16,7 @@ import * as S from "./schema.js";
 import { connections as seedConnections } from "./seed-data/apps.js";
 import { seedEvalCases, seedMcpServers, seedNotifications } from "./seed-data/extra.js";
 import { queueItems as seedQueue, workers as seedWorkers } from "./seed-data/workers.js";
+import { workflowTemplateById } from "../workflow/templates.js";
 import { approvals as seedApprovals, currentUser, inbox as seedInbox, knowledgeBases as seedKbs, members as seedMembers, memories as seedMemories, skills as seedSkills, threads as seedThreads, workspace as seedWorkspace } from "./seed-data/workspace.js";
 
 export const DEMO_PASSWORD = "anvita-demo-2026";
@@ -60,9 +61,13 @@ async function main() {
 
   // Workers (published) + queue + evals
   const workerIds: Record<string, string> = {};
-  for (const w of seedWorkers) {
+  // Demo Workers run the same executable graphs as the matching templates.
+  const seedTemplate: Record<string, string> = { support: "tpl-support", "growth-report": "tpl-report", invoices: "tpl-invoice", "it-voice": "tpl-it", sdr: "tpl-sdr", onboarding: "tpl-onboard" };
+  for (const seed of seedWorkers) {
+    const tplGraph = workflowTemplateById[seedTemplate[seed.id] ?? ""];
+    const w = tplGraph ? { ...seed, nodes: tplGraph.nodes, edges: tplGraph.edges } : seed;
     const id = newId("wrk");
-    workerIds[w.id] = id;
+    workerIds[seed.id] = id;
     const cron = w.nodes.find((n) => n.kind === "trigger")?.config?.cron;
     await db.insert(S.workers).values({
       id,

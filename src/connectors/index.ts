@@ -2,11 +2,15 @@ import { decrypt } from "../lib/crypto.js";
 import { businessDrivers } from "./drivers/business.js";
 import { googleDrivers } from "./drivers/google.js";
 import { otherDrivers } from "./drivers/other.js";
+import { dataDrivers } from "./drivers/data.js";
+import { extraDrivers } from "./drivers/extra.js";
+import { financeDrivers } from "./drivers/finance.js";
+import { hrDrivers } from "./drivers/hr.js";
 import { credentialGetter, makeCaller } from "./http.js";
 import { connectorFor } from "./providers.js";
 import type { Credentials, Driver } from "./types.js";
 
-export const DRIVERS: Record<string, Driver> = { ...googleDrivers, ...businessDrivers, ...otherDrivers };
+export const DRIVERS: Record<string, Driver> = { ...googleDrivers, ...businessDrivers, ...otherDrivers, ...extraDrivers, ...financeDrivers, ...hrDrivers, ...dataDrivers };
 
 /** Parse stored credentials; legacy `{botToken}` blobs become API-key credentials. */
 export function parseCredentials(enc: string | null | undefined): Credentials | null {
@@ -32,7 +36,7 @@ export async function runLive(appId: string, action: string, input: Record<strin
 export async function testConnection(appId: string, connection: { id: string | null; credentials: Credentials }): Promise<string> {
   const c = connectorFor(appId);
   if (!c?.test) return "Credentials saved (this app has no test call)";
-  const r = await c.test(makeCaller(appId, connection.id, connection.credentials));
+  const r = await c.test(makeCaller(appId, connection.id, connection.credentials), credentialGetter(connection.credentials));
   if (typeof r === "string") return r;
   // Keep provider facts (e.g. Slack team id) on the credentials for routing inbound events.
   connection.credentials.extra = { ...(connection.credentials.extra ?? {}), ...r.extra };

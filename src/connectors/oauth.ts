@@ -67,7 +67,7 @@ async function tokenRequest(appId: string, extra: Record<string, string>, params
   return data;
 }
 
-export async function exchangeCode(s: ConnectState, code: string): Promise<Credentials> {
+export async function exchangeCode(s: ConnectState, code: string, callbackExtra: Record<string, string> = {}): Promise<Credentials> {
   const t = await tokenRequest(s.appId, s.extra, { grant_type: "authorization_code", code, redirect_uri: redirectUri() });
   const o = connectorFor(s.appId)!.oauth!;
   return {
@@ -76,7 +76,7 @@ export async function exchangeCode(s: ConnectState, code: string): Promise<Crede
     refreshToken: t.refresh_token ? String(t.refresh_token) : undefined,
     expiresAt: t.expires_in ? Date.now() + Number(t.expires_in) * 1000 : undefined,
     scope: t.scope ? String(t.scope) : undefined,
-    extra: { ...s.extra, ...(o.extract?.(t) ?? {}) },
+    extra: { ...s.extra, ...callbackExtra, ...(o.extract?.(t) ?? {}) },
   };
 }
 

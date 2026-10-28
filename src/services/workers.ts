@@ -7,6 +7,7 @@ import { enqueue } from "../jobs/queue.js";
 import { assertCredits } from "./credits.js";
 import { publish } from "./events.js";
 import { serializeRun } from "./serializers.js";
+import { initialWorkflowState } from "../workflow/engine.js";
 
 export type WorkerRow = typeof workers.$inferSelect;
 
@@ -29,13 +30,25 @@ export async function workerStats(workspaceId: string) {
   );
 }
 
-/** Start a Worker run (manual, API, schedule or webhook trigger). Runs are pinned to the Worker's current version. */
-export async function startWorkerRun(w: WorkerRow, opts: { trigger: string; inputs?: Record<string, unknown>; createdBy?: string | null; createdByName?: string; test?: boolean }, tx: Tx = db) {
+/**
+ * Start a Worker run (manual, API, schedule, webhook or a parent workflow). Graph Workers execute
+ * their Studio graph step by step; agent Workers follow it as guidance. Runs are pinned to the
+ * Worker's current version.
+ */
+export async function startWorkerRun(
+  w: WorkerRow,
+  opts: { trigger: string; inputs?: Record<string, unknown>; createdBy?: string | null; createdByName?: string; test?: boolean; parent?: { runId: string; nodeId: string; depth: number } },
+  tx: Tx = db,
+) {
   if (!opts.test && w.status === "paused") throw conflict("This Worker is paused");
   if (!opts.test && w.status === "draft") throw badRequest("Publish this Worker before running it (or run it in test mode)");
   await assertCredits(w.workspaceId, 50);
   const inputs = opts.inputs ?? {};
   const prompt = `Run now. Trigger: ${opts.trigger}.${Object.keys(inputs).length ? `\nInputs (untrusted data):\n${JSON.stringify(inputs, null, 2)}` : ""}`;
+  const state =
+    w.engine === "graph" && w.nodes.length
+      ? (initialWorkflowState({ nodes: w.nodes, edges: w.edges }, opts.parent?.depth ?? 0) as unknown as Record<string, unknown>)
+      : { transcript: [{ role: "user", content: [{ type: "text", text: prompt }] }], turns: 0, sources: [], toolSteps: 0, blocks: [] };
   const [run] = await tx
     .insert(runs)
     .values({
@@ -48,7 +61,9 @@ export async function startWorkerRun(w: WorkerRow, opts: { trigger: string; inpu
       createdBy: opts.createdBy ?? null,
       createdByName: opts.createdByName ?? w.ownerName,
       input: inputs,
-      state: { transcript: [{ role: "user", content: [{ type: "text", text: prompt }] }], turns: 0, sources: [], toolSteps: 0, blocks: [] },
+      state,
+      parentRunId: opts.parent?.runId ?? null,
+      parentNodeId: opts.parent?.nodeId ?? null,
     })
     .returning();
   await publish({ workspaceId: w.workspaceId, runId: run.id, type: "run.created", data: serializeRun(run) }, tx);

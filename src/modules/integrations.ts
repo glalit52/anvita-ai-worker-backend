@@ -89,14 +89,15 @@ export const integrationRoutes: FastifyPluginAsyncZod = async (app) => {
   );
 
   /** OAuth redirect target (public): exchange the code, save the connection, send the user back to the app. */
-  app.get("/oauth/callback", { schema: { hide: true, security: [], querystring: z.object({ code: z.string().optional(), state: z.string().optional(), error: z.string().optional(), error_description: z.string().optional(), shop: z.string().optional() }) } }, async (req, reply) => {
+  app.get("/oauth/callback", { schema: { hide: true, security: [], querystring: z.object({ code: z.string().optional(), state: z.string().optional(), error: z.string().optional(), error_description: z.string().optional(), shop: z.string().optional(), realmId: z.string().max(40).optional() }) } }, async (req, reply) => {
     const back = (path: string, params: Record<string, string>) => reply.redirect(`${config.WEB_URL}${path}${path.includes("?") ? "&" : "?"}${new URLSearchParams(params)}`);
     let state: ConnectState | null = null;
     try {
       if (!req.query.state) throw new ConnectorError("Missing state");
       state = await readState(req.query.state);
       if (req.query.error || !req.query.code) throw new ConnectorError(req.query.error_description ?? req.query.error ?? "Authorization was cancelled");
-      const creds = await exchangeCode(state, req.query.code);
+      // QuickBooks identifies the company in the callback, not the token response.
+      const creds = await exchangeCode(state, req.query.code, req.query.realmId ? { realmId: req.query.realmId } : {});
       // The user may have left the workspace while on the provider's consent screen.
       const [m] = await db.select({ role: memberships.role }).from(memberships).where(and(eq(memberships.workspaceId, state.workspaceId), eq(memberships.userId, state.userId), eq(memberships.status, "active")));
       if (!m || !can(m.role, "connections:write")) throw new ConnectorError("You no longer have permission to connect apps in this workspace");

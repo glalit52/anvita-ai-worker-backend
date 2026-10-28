@@ -21,7 +21,9 @@ export interface Session { token: string; refreshToken: string; workspaceId: str
 
 export async function signup(app: FastifyInstance, opts: { name?: string; workspaceName?: string; domain?: string } = {}): Promise<Session> {
   const email = `u${randomString(8)}@${opts.domain ?? "acme.in"}`;
-  const res = await app.inject({ method: "POST", url: "/v1/auth/signup", payload: { name: opts.name ?? "Test Owner", email, password: "correct-horse-battery", workspaceName: opts.workspaceName ?? "Acme" } });
+  // Each signup comes from its own address so suites with many workspaces stay under the auth rate limit.
+  const remoteAddress = `10.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250) + 1}`;
+  const res = await app.inject({ method: "POST", url: "/v1/auth/signup", remoteAddress, payload: { name: opts.name ?? "Test Owner", email, password: "correct-horse-battery", workspaceName: opts.workspaceName ?? "Acme" } });
   if (res.statusCode !== 201) throw new Error(`signup failed: ${res.body}`);
   const b = res.json();
   return { token: b.accessToken, refreshToken: b.refreshToken, workspaceId: b.workspaceId, userId: b.user.id, email };

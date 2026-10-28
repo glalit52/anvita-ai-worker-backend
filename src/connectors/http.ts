@@ -9,6 +9,11 @@ import { ConnectorError, type Caller, type Credentials } from "./types.js";
 /** Normalise user-entered values used inside URLs ({shop}, {site}, {subdomain}…). */
 function urlValue(key: string, v: string): string {
   if (key === "subdomain") return zendeskSub(v);
+  // Full base URLs (Zoho API domain, Salesforce instance, Tally gateway) are used as-is.
+  if (["apiDomain", "instanceUrl", "url"].includes(key)) {
+    if (!/^https?:\/\//.test(v)) throw new ConnectorError(`Invalid ${key}`);
+    return v.replace(/\/+$/, "");
+  }
   if (key === "ad_account_id") return v.replace(/^act_/, "");
   if (["shop", "site", "domain"].includes(key)) return host(v);
   return encodeURIComponent(v);
@@ -42,7 +47,7 @@ export function makeCaller(appId: string, connectionId: string | null, creds: Cr
       if (!v) throw new ConnectorError(`The ${appId} connection is missing “${k}”. Reconnect it in Integrations.`);
       return urlValue(k, v);
     });
-    const headers: Record<string, string> = { Accept: "application/json", ...conn.headers(creds), ...(init.headers ?? {}) };
+    const headers: Record<string, string> = { Accept: "application/json", ...conn.headers(creds), ...(conn.dynamicHeaders ? await conn.dynamicHeaders(creds) : {}), ...(init.headers ?? {}) };
     let body: string | undefined;
     if (init.form) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";

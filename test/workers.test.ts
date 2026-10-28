@@ -24,11 +24,19 @@ describe("workers", () => {
     const pub = await api.post(`/v1/workers/${w.body.id}/publish`, { note: "first" });
     expect(pub.body).toMatchObject({ status: "live", version: 1 });
 
-    for (const appId of ["metaads", "hubspot", "slack"]) await api.post("/v1/connections", { appId });
+    for (const appId of ["metaads", "googleads", "hubspot", "slack"]) await api.post("/v1/connections", { appId });
     const run = await api.post(`/v1/workers/${w.body.id}/runs`, { inputs: { range: "last_week" } });
     expect(run.status).toBe(202);
     await ctx.runner.drain();
+    // The graph runs step by step: three parallel pulls, the report, the summary — then the founder review.
+    const waiting = (await api.get(`/v1/runs/${run.body.id}`)).body;
+    expect(waiting.status).toBe("waiting_approval");
+    const review = (await api.get("/v1/approvals?status=pending")).body.data.find((a: any) => a.title === "Founder review");
+    expect(review).toBeTruthy();
+    expect((await api.post(`/v1/approvals/${review.id}/decision`, { decision: "approved" })).status).toBe(200);
+    await ctx.runner.drain();
     const done = (await api.get(`/v1/runs/${run.body.id}`)).body;
+    if (done.status !== "succeeded") console.log("RUNERR", done.error);
     expect(done).toMatchObject({ status: "succeeded", kind: "worker", workerVersion: 1 });
     expect(done.stepLog.length).toBeGreaterThan(0);
 

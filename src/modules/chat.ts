@@ -4,6 +4,8 @@ import { z } from "zod";
 import { config } from "../config.js";
 import type { ChatBlock } from "../contracts/web.js";
 import { db } from "../db/client.js";
+import { isTextMime } from "../services/artifacts.js";
+import { initialWorkflowState, workflowTrace } from "../workflow/engine.js";
 import { artifacts, messages, runs, runSteps, threads, workers } from "../db/schema.js";
 import { assertFound, badRequest } from "../lib/errors.js";
 import { CLIENT_ID_RE, newId } from "../lib/ids.js";
@@ -71,6 +73,10 @@ export async function startAgentRun(a: AuthContext, threadId: string, body: { te
   if (files.length !== attachments.length) throw badRequest("One or more attachments were not found");
   const transcript = await buildTranscript(thread.id, body.text, attachments, a.workspaceId);
 
+  // A Worker with a workflow graph executes it step by step; otherwise the agent answers.
+  const [graphWorker] = opts.workerId ? await db.select().from(workers).where(and(eq(workers.id, opts.workerId), eq(workers.engine, "graph"))) : [];
+  const initialState = graphWorker?.nodes.length ? (initialWorkflowState({ nodes: graphWorker.nodes, edges: graphWorker.edges }) as unknown as Record<string, unknown>) : { transcript, turns: 0, sources: [], toolSteps: 0 };
+
   const runId = newId("run");
   const now = Date.now();
   const userMsg = { id: newId("msg"), workspaceId: a.workspaceId, threadId: thread.id, role: "user" as const, author: a.userName, authorId: a.userId, runId, createdAt: new Date(now), blocks: [{ type: "text", text: body.text }, ...files.map((f) => ({ type: "artifact", artifact: { id: f.id, kind: f.kind, title: f.title, subtitle: f.subtitle ?? undefined, size: `${Math.max(1, Math.round(f.sizeBytes / 1024))} KB` } }))] };
@@ -81,7 +87,7 @@ export async function startAgentRun(a: AuthContext, threadId: string, body: { te
     const [am] = await tx.insert(messages).values(asstMsg).returning();
     const [run] = await tx
       .insert(runs)
-      .values({ id: runId, workspaceId: a.workspaceId, kind: "agent", threadId: thread.id, workerId: opts.workerId ?? null, trigger: opts.trigger ?? "chat", assistantMessageId: am.id, createdBy: a.userId, createdByName: a.userName, input: { text: body.text, web: !!body.web, attachments, ...(opts.customer ? { customer: true } : {}) }, state: { transcript, turns: 0, sources: [], toolSteps: 0 } })
+      .values({ id: runId, workspaceId: a.workspaceId, kind: "agent", threadId: thread.id, workerId: opts.workerId ?? null, trigger: opts.trigger ?? "chat", assistantMessageId: am.id, createdBy: a.userId, createdByName: a.userName, input: { text: body.text, web: !!body.web, attachments, ...(opts.customer ? { customer: true } : {}) }, state: initialState, ...(graphWorker ? { workerVersion: graphWorker.version } : {}) })
       .returning();
     const [t] = await tx.update(threads).set({ status: "running", updatedAt: new Date() }).where(eq(threads.id, thread.id)).returning();
     await publish({ workspaceId: a.workspaceId, threadId: thread.id, runId, type: "message.created", data: serializeMessage(um) }, tx);
@@ -173,13 +179,24 @@ export const chatRoutes: FastifyPluginAsyncZod = async (app) => {
     const a = auth(req);
     const r = assertFound((await db.select().from(runs).where(and(eq(runs.id, req.params.id), eq(runs.workspaceId, a.workspaceId))))[0], "Run");
     const steps = await db.select().from(runSteps).where(eq(runSteps.runId, r.id)).orderBy(asc(runSteps.startedAt));
-    return { ...serializeRun(r), blocks: (r.state as { blocks?: unknown[] }).blocks ?? null, stepLog: steps.map((s) => ({ id: s.id, kind: s.kind, name: s.name, label: s.label, appId: s.appId, status: s.status, model: s.model, tokens: s.tokens, credits: s.credits, startedAt: s.startedAt?.toISOString(), endedAt: s.endedAt?.toISOString() })) };
+    const trace = workflowTrace(r);
+    return { ...serializeRun(r), blocks: (r.state as { blocks?: unknown[] }).blocks ?? null, output: (r.state as { output?: unknown }).output ?? null, trace, stepLog: steps.map((s) => ({ id: s.id, kind: s.kind, name: s.name, label: s.label, appId: s.appId, status: s.status, model: s.model, tokens: s.tokens, credits: s.credits, startedAt: s.startedAt?.toISOString(), endedAt: s.endedAt?.toISOString() })) };
+  });
+
+  app.get("/runs/:id/trace", { preHandler: app.authorize("workspace:read"), schema: { tags: ["runs"], params: idParam } }, async (req) => {
+    const a = auth(req);
+    const r = assertFound((await db.select().from(runs).where(and(eq(runs.id, req.params.id), eq(runs.workspaceId, a.workspaceId))))[0], "Run");
+    const trace = workflowTrace(r);
+    if (!trace) throw badRequest("This run didn't execute a workflow graph");
+    return { runId: r.id, status: r.status, error: r.error, ...trace };
   });
 
   app.post("/runs/:id/cancel", { preHandler: app.authorize("chat:write"), schema: { tags: ["runs"], params: idParam } }, async (req) => {
     const a = auth(req);
     const [r] = await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.id, req.params.id), eq(runs.workspaceId, a.workspaceId), inArray(runs.status, ["queued", "running", "waiting_approval", "waiting_auth"]))).returning();
     if (!r) throw badRequest("Run is not active");
+    // Workers called by this run stop too.
+    await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.parentRunId, r.id), inArray(runs.status, ["queued", "running", "waiting_approval", "waiting_auth"])));
     if (r.threadId) {
       const [t] = await db.update(threads).set({ status: "done" }).where(eq(threads.id, r.threadId)).returning();
       if (r.assistantMessageId) {
@@ -220,7 +237,7 @@ export const chatRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get("/artifacts/:id/content", { preHandler: app.authorize("workspace:read"), schema: { tags: ["files"], params: idParam } }, async (req, reply) => {
     const a = auth(req);
     const f = assertFound((await db.select().from(artifacts).where(and(eq(artifacts.id, req.params.id), eq(artifacts.workspaceId, a.workspaceId))))[0], "Artifact");
-    const binary = DOC_MIME.has(f.mime) || IMAGE_MIME.has(f.mime);
+    const binary = !isTextMime(f.mime);
     reply.header("content-type", binary ? f.mime : `${f.mime}; charset=utf-8`);
     reply.header("content-disposition", `attachment; filename="${encodeURIComponent(f.title)}"`);
     // HTML artifacts are user/model generated: never let them run on the API origin.

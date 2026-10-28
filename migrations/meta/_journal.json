@@ -43,6 +43,20 @@
       "when": 1793179545902,
       "tag": "0005_payments",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793203118004,
+      "tag": "0006_workflows",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793204033810,
+      "tag": "0007_custom_apis",
+      "breakpoints": true
     }
   ]
 }
