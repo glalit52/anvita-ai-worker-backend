@@ -56,3 +56,28 @@ export function tokenCredits(model: string, usage: { input_tokens?: number | nul
   const input = (usage.input_tokens ?? 0) + 1.25 * (usage.cache_creation_input_tokens ?? 0) + 0.1 * (usage.cache_read_input_tokens ?? 0);
   return Math.max(1, Math.ceil((input * p.in + (usage.output_tokens ?? 0) * p.out) / 1_000_000));
 }
+
+const THRESHOLDS = [0.5, 0.8, 1];
+
+/**
+ * After a run: if its usage pushed the workspace past 50 / 80 / 100 % of its credits, emit the
+ * `usage.threshold` webhook and (unless billing alerts are off) notify admins. Checked per run,
+ * not per charge, to keep the ledger sum off the hot path.
+ */
+export async function checkUsageThresholds(workspaceId: string, justUsed: number) {
+  if (justUsed <= 0) return;
+  const b = await getBalance(workspaceId);
+  if (b.creditsTotal <= 0) return;
+  const now = b.creditsUsed / b.creditsTotal;
+  const before = (b.creditsUsed - justUsed) / b.creditsTotal;
+  const crossed = THRESHOLDS.filter((t) => before < t && now >= t);
+  if (!crossed.length) return;
+  const pct = Math.round(Math.max(...crossed) * 100);
+  const { emitWebhook } = await import("./webhooks.js");
+  await emitWebhook(workspaceId, "usage.threshold", { threshold: pct, creditsUsed: b.creditsUsed, creditsTotal: b.creditsTotal, remaining: b.remaining });
+  const { workspaces } = await import("../db/schema.js");
+  const [ws] = await db.select({ settings: workspaces.settings }).from(workspaces).where(eq(workspaces.id, workspaceId));
+  if (ws?.settings?.["billing.alerts"] === false) return;
+  const { notify } = await import("./notifications.js");
+  await notify({ workspaceId, appId: "anvita", title: pct >= 100 ? "Your workspace has used all of its credits — top up to keep Workers running" : `Your workspace has used ${pct}% of its credits`, meta: `${b.remaining.toLocaleString("en-IN")} credits left`, href: "/settings/billing", minRole: "admin" });
+}

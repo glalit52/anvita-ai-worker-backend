@@ -7,7 +7,7 @@ import { db, sqlClient } from "../db/client.js";
 import { artifacts, connections, memories, messages, runs, threads, workers, workspaces } from "../db/schema.js";
 import { enqueue } from "../jobs/queue.js";
 import { artifactCard } from "../services/artifacts.js";
-import { charge, tokenCredits } from "../services/credits.js";
+import { checkUsageThresholds, charge, tokenCredits } from "../services/credits.js";
 import { publish } from "../services/events.js";
 import { notify } from "../services/notifications.js";
 import { emitWebhook } from "../services/webhooks.js";
@@ -281,6 +281,7 @@ async function finish(run: Run, state: AgentState, w: MessageWriter, status: "su
   await setThreadStatus(run, "done");
   await queueChannelDelivery(run);
   if (r && status !== "cancelled") await emitWebhook(run.workspaceId, status === "succeeded" ? "run.completed" : "run.failed", serializeRun(r));
+  if (r) await checkUsageThresholds(run.workspaceId, r.creditsUsed).catch(() => {});
   if (r && run.kind === "worker" && run.workerId && status === "failed") {
     await notify({ workspaceId: run.workspaceId, appId: "sandbox", title: `Worker run failed: ${error?.slice(0, 80) ?? "error"}`, meta: "Worker run · just now", href: `/workers/${run.workerId}`, minRole: "builder" });
   }

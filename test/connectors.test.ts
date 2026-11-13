@@ -145,3 +145,19 @@ describe("OAuth connectors", () => {
     expect(mime).toMatch(/Subject: /);
   });
 });
+
+describe("setup guides", () => {
+  it("ships step-by-step guides with real webhook URLs and OAuth admin setup", async () => {
+    const s = await signup(ctx.app);
+    const apps = (await client(ctx.app, s).get("/v1/apps")).body.data;
+    const slack = apps.find((a: any) => a.id === "slack").auth.guide;
+    expect(slack.steps.length).toBeGreaterThan(2);
+    expect(slack.steps.join(" ")).toContain("/v1/hooks/slack/interactive");
+    expect(slack.steps.join(" ")).not.toContain("{API}");
+    expect(slack.oauthAdmin).toMatchObject({ env: ["SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET"] });
+    expect(slack.oauthAdmin.redirectUri).toMatch(/\/v1\/oauth\/callback$/);
+    const gmail = apps.find((a: any) => a.id === "gmail").auth.guide;
+    expect(gmail.oauthAdmin.console).toBe("Google Cloud Console");
+    for (const id of ["hubspot", "shopify", "razorpay", "stripe", "zendesk", "postgres", "notion", "jira"]) expect(apps.find((a: any) => a.id === id).auth.guide.steps.length, id).toBeGreaterThan(1);
+  });
+});

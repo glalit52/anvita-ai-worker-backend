@@ -139,6 +139,11 @@ function keyAllows(scopes: string[], perm?: Permission): boolean {
   return (map[perm] ?? []).some((need) => scopes.some((s) => s === need || s.startsWith(`${need}:`)));
 }
 
+/** Whether this user or API key may do `perm` (the same check `authorize` runs). */
+export function allowed(ctx: AuthContext, perm: Permission): boolean {
+  return ctx.apiKeyId ? keyAllows(ctx.scopes ?? [], perm) : can(ctx.role, perm);
+}
+
 export default fp(async (app: FastifyInstance) => {
   app.decorateRequest("auth", undefined);
   app.decorateRequest("tenantScoped", false);

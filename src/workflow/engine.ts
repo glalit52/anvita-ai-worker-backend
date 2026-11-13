@@ -15,7 +15,7 @@ import { HANDOFF_TOOL } from "../runtime/tools/handoff.js";
 import { workspaceRegistry, type Registry } from "../runtime/tools/registry.js";
 import type { ToolDef } from "../runtime/tools/types.js";
 import { artifactCard } from "../services/artifacts.js";
-import { charge, tokenCredits } from "../services/credits.js";
+import { charge, checkUsageThresholds, tokenCredits } from "../services/credits.js";
 import { searchKnowledge } from "../services/knowledge.js";
 import { notify } from "../services/notifications.js";
 import { serializeRun } from "../services/serializers.js";
@@ -900,6 +900,7 @@ async function finishWorkflow(ex: Exec, status: "succeeded" | "failed" | "cancel
   await setThreadStatus(run, "done");
   await queueChannelDelivery(run);
   if (r && status !== "cancelled") await emitWebhook(run.workspaceId, status === "succeeded" ? "run.completed" : "run.failed", serializeRun(r));
+  if (r) await checkUsageThresholds(run.workspaceId, r.creditsUsed).catch(() => {});
   if (r && run.workerId && status === "failed" && run.kind !== "test") {
     await notify({ workspaceId: run.workspaceId, appId: "sandbox", title: `${ex.worker?.name ?? "Worker"} failed: ${error?.slice(0, 80) ?? "error"}`, meta: "Worker run · just now", href: `/workers/${run.workerId}`, minRole: "builder" });
   }

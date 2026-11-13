@@ -15,6 +15,7 @@ import { connectorFor, oauthConfigured } from "../connectors/index.js";
 import { authorizeUrl, exchangeCode, readState, type ConnectState } from "../connectors/oauth.js";
 import { ConnectorError } from "../connectors/types.js";
 import { listMcpTools } from "../connectors/mcp.js";
+import { guideFor } from "../connectors/guides.js";
 import { apiKeyCredentials, retestConnection, saveConnection } from "../services/connections.js";
 import { can } from "../services/rbac.js";
 import { audit } from "../services/audit.js";
@@ -47,6 +48,7 @@ export const integrationRoutes: FastifyPluginAsyncZod = async (app) => {
               oauthConfigured: oauthConfigured(x.id),
               oauthNeeds: c?.oauth?.needs ?? [],
               apiKey: c?.apiKey ? { fields: c.apiKey.fields, help: c.apiKey.help } : null,
+              guide: guideFor(x.id),
               live: !!c || SYSTEM_APPS.has(x.id),
             },
           };
