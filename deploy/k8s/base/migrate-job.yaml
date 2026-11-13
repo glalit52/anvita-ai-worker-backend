@@ -1,0 +1,19 @@
+# Applies database migrations before new pods roll out (the deploy workflow waits for it).
+# API and worker pods run with MIGRATE_ON_START=false so only this job touches the schema.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: anvita-migrate
+  labels: { anvita.io/phase: migrate }
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: anvita-backend
+          command: ["node", "dist/db/migrate.js"]
+          envFrom: [{ secretRef: { name: anvita-env } }]
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 512Mi } }

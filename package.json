@@ -10,15 +10,16 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "build": "tsc -p tsconfig.build.json && mkdir -p dist/sandbox/runtime && cp src/sandbox/runtime/runner.py src/sandbox/runtime/runner.mjs dist/sandbox/runtime/ && mkdir -p dist/channels/assets && cp src/channels/assets/widget.js dist/channels/assets/",
-    "start": "node dist/main.js",
-    "start:api": "ROLE=api node dist/main.js",
-    "start:worker": "ROLE=worker node dist/main.js",
+    "start": "node --import ./dist/telemetry.js dist/main.js",
+    "start:api": "ROLE=api node --import ./dist/telemetry.js dist/main.js",
+    "start:worker": "ROLE=worker node --import ./dist/telemetry.js dist/main.js",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:backup": "scripts/backup.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
@@ -30,6 +31,11 @@
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^6.1.2",
     "@node-saml/node-saml": "^5.2.0",
+    "@opentelemetry/api": "^1.10.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.83.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.301.2",
+    "@opentelemetry/sdk-node": "^0.301.2",
+    "@sentry/node": "^11.12.0",
     "dotenv": "^18.0.9",
     "drizzle-orm": "^0.45.4",
     "fast-xml-parser": "^5.11.2",
@@ -39,6 +45,7 @@
     "jose": "^6.2.13",
     "pdfkit": "^0.17.2",
     "postgres": "^3.4.9",
+    "prom-client": "^15.1.3",
     "web-push": "^3.6.7",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"

@@ -1,3 +1,4 @@
+import { jobDuration, jobsProcessed, reportError, withSpan } from "../services/observability.js";
 import { hostname } from "node:os";
 import { and, eq, lt, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
@@ -94,19 +95,26 @@ export class JobRunner {
   private async execute(job: Pick<typeof jobs.$inferSelect, "id" | "type" | "payload" | "attempts" | "maxAttempts">) {
     const log = this.log.child({ jobId: job.id, jobType: job.type, attempt: job.attempts });
     const handler = handlers.get(job.type);
+    const stop = jobDuration.startTimer({ type: job.type });
     try {
       if (!handler) throw new Error(`no handler registered for job type ${job.type}`);
-      await handler(job.payload, { jobId: job.id, attempt: job.attempts, log });
+      const runId = typeof job.payload.runId === "string" ? job.payload.runId : "";
+      await withSpan(`job ${job.type}`, { "job.id": job.id, "job.type": job.type, "job.attempt": job.attempts, ...(runId ? { "anvita.run_id": runId } : {}) }, () => handler(job.payload, { jobId: job.id, attempt: job.attempts, log }));
       await db.update(jobs).set({ status: "done", lockedAt: null, lockedBy: null }).where(eq(jobs.id, job.id));
+      jobsProcessed.inc({ type: job.type, outcome: "done" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const final = job.attempts >= job.maxAttempts;
       log[final ? "error" : "warn"]({ err }, final ? "job failed permanently" : "job failed, will retry");
+      jobsProcessed.inc({ type: job.type, outcome: final ? "failed" : "retried" });
+      if (final) reportError(err, { jobType: job.type, jobId: job.id, payload: job.payload });
       const backoffMs = Math.min(10 * 60_000, 2 ** job.attempts * 1000);
       await db
         .update(jobs)
         .set({ status: final ? "failed" : "queued", lastError: msg.slice(0, 2000), lockedAt: null, lockedBy: null, runAt: new Date(Date.now() + backoffMs) })
         .where(eq(jobs.id, job.id));
+    } finally {
+      stop();
     }
   }
 

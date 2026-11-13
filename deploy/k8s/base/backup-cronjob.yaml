@@ -1,0 +1,22 @@
+# Nightly logical backup (scripts/backup.sh) to BACKUP_URI. Point-in-time recovery should come
+# from your managed Postgres (RDS / Cloud SQL / Azure); this is the portable second copy.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: anvita-backup
+spec:
+  schedule: "37 20 * * *" # 02:07 IST
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: anvita-backup # deploy/backup.Dockerfile (pg_dump + AWS CLI + scripts/backup.sh)
+              env:
+                - { name: BACKUP_DIR, value: /tmp/backups }
+              envFrom: [{ secretRef: { name: anvita-backup-env } }] # DATABASE_URL, BACKUP_URI, cloud credentials
+              resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }

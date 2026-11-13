@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { httpDuration, registry, reportError } from "./services/observability.js";
+import { safeEqual } from "./lib/crypto.js";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import multipart from "@fastify/multipart";
@@ -51,7 +53,7 @@ export async function buildApp(opts: { logger?: boolean | object } = {}): Promis
     max: config.RATE_LIMIT_PER_MINUTE,
     timeWindow: "1 minute",
     keyGenerator: (req) => req.headers.authorization?.slice(-24) ?? req.ip,
-    allowList: (req) => req.url.startsWith("/healthz") || req.url.startsWith("/readyz"),
+    allowList: (req) => req.url.startsWith("/healthz") || req.url.startsWith("/readyz") || req.url.startsWith("/metrics"),
   });
   await app.register(multipart, { limits: { fileSize: 25 * 1024 * 1024, files: 10 } });
 
@@ -80,9 +82,25 @@ export async function buildApp(opts: { logger?: boolean | object } = {}): Promis
     const e = err as { statusCode?: number; code?: string; message: string };
     if (e.statusCode && e.statusCode < 500) return reply.status(e.statusCode).send({ error: { code: e.statusCode === 429 ? "rate_limited" : (e.code ?? "bad_request"), message: e.message } });
     req.log.error({ err }, "unhandled error");
+    reportError(err, { requestId: req.id, route: req.routeOptions?.url ?? req.url, method: req.method, workspaceId: req.auth?.workspaceId ?? "" });
     return reply.status(500).send({ error: { code: "internal", message: "Something went wrong", requestId: req.id } });
   });
   app.setNotFoundHandler((req, reply) => reply.status(404).send({ error: { code: "not_found", message: `Route ${req.method} ${req.url} not found` } }));
+
+  // Request latency by route template (never the raw URL, to keep label cardinality bounded).
+  app.addHook("onResponse", async (req, reply) => {
+    const route = req.routeOptions?.url;
+    if (!route || route === "/metrics" || route === "/healthz" || route === "/readyz") return;
+    httpDuration.observe({ method: req.method, route, status: String(reply.statusCode) }, reply.elapsedTime / 1000);
+  });
+
+  // Prometheus scrape endpoint, enabled by METRICS_TOKEN (sent as a bearer token).
+  app.get("/metrics", { schema: { hide: true }, config: { rateLimit: false } }, async (req, reply) => {
+    const token = process.env.METRICS_TOKEN;
+    if (!token) return reply.status(404).send({ error: { code: "not_found", message: "Metrics are disabled" } });
+    if (!safeEqual(req.headers.authorization ?? "", `Bearer ${token}`)) return reply.status(401).send({ error: { code: "unauthorized", message: "Bad metrics token" } });
+    return reply.type(registry.contentType).send(await registry.metrics());
+  });
 
   app.get("/healthz", { schema: { hide: true } }, async () => ({ ok: true }));
   app.get("/readyz", { schema: { hide: true } }, async (_req, reply) => {

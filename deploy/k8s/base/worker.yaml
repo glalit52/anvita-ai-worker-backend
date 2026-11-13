@@ -1,0 +1,24 @@
+# Background jobs: agent/workflow runs, webhooks, channel delivery, billing cycle, retention.
+# Workers drain in-flight jobs on SIGTERM (up to 25 s) and long workflows resume from the queue.
+# Code steps need a sandbox: SANDBOX_PROVIDER=docker with a reachable Docker daemon (sidecar or
+# remote DOCKER_HOST), or "process" only for trusted, single-tenant installs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anvita-worker
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: anvita-worker } }
+  template:
+    metadata:
+      labels: { app: anvita-worker }
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: worker
+          image: anvita-backend
+          env:
+            - { name: ROLE, value: worker }
+            - { name: MIGRATE_ON_START, value: "false" }
+          envFrom: [{ secretRef: { name: anvita-env } }]
+          resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }

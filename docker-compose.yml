@@ -4,7 +4,7 @@
 #   docker compose exec api node dist/db/seed.js   # optional demo data
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: anvita
       POSTGRES_PASSWORD: anvita

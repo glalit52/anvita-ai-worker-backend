@@ -1,0 +1,5 @@
+# Production: pin the image to a release tag (the release workflow sets it).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: anvita
+resources: [../../base]

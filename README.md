@@ -264,14 +264,17 @@ inbox, API key scopes/revocation, signed outbound webhooks, OpenAPI and health c
 
 ## Deployment
 
-- The web app's live-mode e2e suite (`npm run test:e2e:live` in the frontend) exercises this API end to end in a browser.
-- `Dockerfile` builds a non-root image; `docker-compose.yml` runs Postgres + `api` + `worker`.
+Full guide: **[docs/DEPLOY.md](docs/DEPLOY.md)** — environments, variables, provider webhooks, release flow, backups and observability.
+
+- `Dockerfile` builds a non-root image; `docker-compose.yml` runs Postgres (pgvector) + `api` + `worker`.
+- `deploy/k8s` has Kubernetes manifests (migration Job, API, workers, nightly backup CronJob) with staging and production overlays; `.github/workflows/release.yml` publishes images to GHCR and deploys `main` to staging and `v*` tags to production.
 - Migrations run on boot (`MIGRATE_ON_START=true`) or as a release step (`npm run db:migrate`). Generate new ones with `npm run db:generate` after editing `src/db/schema.ts`; CI checks they are in sync.
-- Scale the API horizontally (SSE fan-out uses Postgres `LISTEN/NOTIFY`); scale workers by replicas and `JOBS_CONCURRENCY`. Graceful shutdown drains in-flight jobs.
-- Health: `/healthz` (liveness), `/readyz` (database).
+- Scale the API horizontally (SSE fan-out uses Postgres `LISTEN/NOTIFY`); scale workers by replicas and `JOBS_CONCURRENCY`. Graceful shutdown drains in-flight jobs; long workflows resume from the queue.
+- Health: `/healthz` (liveness), `/readyz` (database). Metrics: `/metrics` (with `METRICS_TOKEN`). Traces: `OTEL_EXPORTER_OTLP_ENDPOINT`. Errors: `SENTRY_DSN`.
+- Backups: `scripts/backup.sh` / `scripts/restore.sh`.
 
 ## What's next
 
-- Long-tail apps through an aggregator (Composio/Pipedream); interactive MCP OAuth (servers take a bearer token today).
-- Teams as an inbound channel, Slack interactive approval buttons, SAML single logout.
-- Temporal (or similar) for very long-running workflows; OpenTelemetry tracing; reranking on top of hybrid search.
+- Connector accounts and provider keys per deployment (each app's credentials are added by your team in Integrations; the drivers are in place).
+- More voice providers (Exotel, Plivo) behind the `VoiceProvider` interface in `src/channels/voice.ts`; Bedrock / Vertex model providers in `src/runtime/model.ts`.
+- A platform-operator (super admin) console; SAML single logout; interactive MCP OAuth (servers take a bearer token today).

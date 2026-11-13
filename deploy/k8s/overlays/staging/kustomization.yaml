@@ -1,0 +1,14 @@
+# Staging: one replica each, separate database and secrets, test payment keys.
+#   kubectl create namespace anvita-staging
+#   kubectl -n anvita-staging create secret generic anvita-env --from-env-file=staging.env
+#   kubectl -n anvita-staging create secret generic anvita-backup-env --from-literal=DATABASE_URL=… --from-literal=BACKUP_URI=s3://…
+#   kubectl apply -k deploy/k8s/overlays/staging
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: anvita-staging
+resources: [../../base]
+patches:
+  - target: { kind: Deployment, name: anvita-api }
+    patch: '[{"op":"replace","path":"/spec/replicas","value":1}]'
+  - target: { kind: Deployment, name: anvita-worker }
+    patch: '[{"op":"replace","path":"/spec/replicas","value":1}]'

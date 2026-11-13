@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anvita-api
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: anvita-api } }
+  strategy: { rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
+  template:
+    metadata:
+      labels: { app: anvita-api }
+    spec:
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: api
+          image: anvita-backend
+          env:
+            - { name: ROLE, value: api }
+            - { name: MIGRATE_ON_START, value: "false" }
+          envFrom: [{ secretRef: { name: anvita-env } }]
+          ports: [{ name: http, containerPort: 4000 }]
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 5, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 15, failureThreshold: 4 }
+          resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: anvita-api
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "4000"
+spec:
+  selector: { app: anvita-api }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: anvita-api
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app: anvita-api } }
