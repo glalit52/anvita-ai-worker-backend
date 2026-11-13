@@ -592,6 +592,57 @@ export const payments = pgTable("payments", {
   paidAt: ts("paid_at"),
 }, (t) => [uniqueIndex("payments_provider_ref_uq").on(t.provider, t.providerRef)]);
 
+/** One subscription per workspace: which plan, billing interval, period and how it's paid. */
+export const subscriptions = pgTable("subscriptions", {
+  workspaceId: text("workspace_id").primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
+  plan: text("plan").notNull().default("starter"),
+  interval: text("interval").$type<"month" | "year">().notNull().default("month"),
+  status: text("status").$type<"trialing" | "active" | "past_due" | "cancelled">().notNull().default("active"),
+  /** razorpay / stripe subscription, or "manual" (invoices paid offline / development). */
+  provider: text("provider").$type<"razorpay" | "stripe" | "manual" | "free">().notNull().default("free"),
+  providerRef: text("provider_ref"),
+  currentPeriodStart: ts("current_period_start").notNull(),
+  currentPeriodEnd: ts("current_period_end").notNull(),
+  trialEndsAt: ts("trial_ends_at"),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+  /** A plan change waiting for checkout to complete. */
+  pendingPlan: text("pending_plan"),
+  updatedAt: updatedAt(),
+}, (t) => [index("subscriptions_provider_ref_idx").on(t.provider, t.providerRef)]);
+
+/** GST tax invoices for subscriptions and credit purchases. */
+export const invoices = pgTable("invoices", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  number: text("number").notNull(),
+  kind: text("kind").$type<"subscription" | "credits">().notNull(),
+  status: text("status").$type<"paid" | "due" | "void">().notNull(),
+  currency: text("currency").notNull(),
+  /** Major units (rupees). */
+  subtotal: real("subtotal").notNull(),
+  cgst: real("cgst").notNull().default(0),
+  sgst: real("sgst").notNull().default(0),
+  igst: real("igst").notNull().default(0),
+  total: real("total").notNull(),
+  lines: jsonb("lines").$type<{ description: string; sac: string; quantity: number; amount: number }[]>().notNull(),
+  /** Seller and buyer details as they were when the invoice was issued. */
+  seller: jsonb("seller").$type<Record<string, string>>().notNull(),
+  buyer: jsonb("buyer").$type<Record<string, string>>().notNull(),
+  periodStart: ts("period_start"),
+  periodEnd: ts("period_end"),
+  /** Provider payment / invoice id — makes webhook retries idempotent. */
+  providerRef: text("provider_ref"),
+  issuedAt: ts("issued_at").notNull(),
+  dueAt: ts("due_at"),
+  paidAt: ts("paid_at"),
+}, (t) => [uniqueIndex("invoices_number_uq").on(t.number), uniqueIndex("invoices_provider_ref_uq").on(t.providerRef), index("invoices_ws_idx").on(t.workspaceId, t.issuedAt)]);
+
+/** Provider-side plan ids (Razorpay plans are created once per plan + interval + price). */
+export const providerPlans = pgTable("provider_plans", {
+  key: text("key").primaryKey(),
+  providerId: text("provider_id").notNull(),
+});
+
 export const notifications = pgTable("notifications", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),

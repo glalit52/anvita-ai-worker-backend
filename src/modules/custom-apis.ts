@@ -1,4 +1,5 @@
 import { and, asc, eq } from "drizzle-orm";
+import { assertFeature } from "../services/plans.js";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { operationsFromSpec, parseSpec } from "../connectors/openapi.js";
@@ -68,6 +69,7 @@ export const customApiRoutes: FastifyPluginAsyncZod = async (app) => {
     { preHandler: app.authorize("connections:write"), schema: { tags, body: z.object({ name: z.string().trim().min(1).max(100).optional(), spec: z.string().max(5_000_000).optional(), specUrl: z.string().url().optional(), baseUrl: z.string().url().optional(), ...authFields }) } },
     async (req, reply) => {
       const a = auth(req);
+      await assertFeature(a.workspaceId, "customApis");
       if (!req.body.spec && !req.body.specUrl) throw badRequest("Paste a spec or give its URL");
       const parsed = operationsFromSpec(parseSpec(req.body.spec ?? (await fetchSpec(req.body.specUrl!))));
       if (!parsed.operations.length) throw badRequest("The spec has no operations");

@@ -1,4 +1,5 @@
 import { and, asc, eq } from "drizzle-orm";
+import { assertFeature } from "../services/plans.js";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { appById, apps, SYSTEM_APPS } from "../catalog/index.js";
@@ -159,6 +160,7 @@ export const integrationRoutes: FastifyPluginAsyncZod = async (app) => {
     },
     async (req, reply) => {
       const a = auth(req);
+      await assertFeature(a.workspaceId, "mcp");
       if (req.body.auth === "oauth" && !req.body.token) throw badRequest("Paste an access token for this server (interactive MCP OAuth isn't supported yet)");
       const found = await discover(req.body.url, req.body.token ?? null);
       const [row] = await db.insert(mcpServers).values({ id: newId("mcp"), workspaceId: a.workspaceId, name: req.body.name, url: req.body.url, auth: req.body.auth, tokenEnc: req.body.token ? encrypt(req.body.token) : null, ...found }).returning();

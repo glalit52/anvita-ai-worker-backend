@@ -61,6 +61,16 @@ const schema = z.object({
   BILLING_CURRENCY: z.string().default("INR"),
   /** Tax added at checkout (18% GST in India). */
   BILLING_TAX_RATE: z.coerce.number().min(0).max(1).default(0.18),
+  /** New workspaces get this many days of the Business plan before falling back to Starter. */
+  TRIAL_DAYS: z.coerce.number().int().min(0).default(14),
+  /** Seller details printed on GST tax invoices. */
+  SELLER_NAME: z.string().default("Anvita AI Technologies Pvt Ltd"),
+  SELLER_GSTIN: z.string().default(""),
+  SELLER_ADDRESS: z.string().default("Bengaluru, Karnataka, India"),
+  /** GST state code of the seller (29 = Karnataka). Same-state buyers pay CGST+SGST, others IGST. */
+  SELLER_STATE_CODE: z.string().default("29"),
+  /** SAC for SaaS / online information services. */
+  INVOICE_SAC: z.string().default("998315"),
   /** Signing secret of the Anvita Slack app (Events API). */
   SLACK_SIGNING_SECRET: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),

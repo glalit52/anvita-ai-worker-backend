@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { assertLimit } from "./plans.js";
 import { appById } from "../catalog/index.js";
 import { connectorFor, parseCredentials, testConnection, type Credentials } from "../connectors/index.js";
 import { ConnectorError } from "../connectors/types.js";
@@ -47,6 +48,8 @@ export interface SaveInput {
  * Runs waiting on this app resume once it's healthy.
  */
 export async function saveConnection(input: SaveInput) {
+  const [prior] = await db.select({ id: connections.id }).from(connections).where(and(eq(connections.workspaceId, input.workspaceId), eq(connections.appId, input.appId)));
+  if (!prior) await assertLimit(input.workspaceId, "connections");
   // Re-connecting without credentials never downgrades a live connection to demo data.
   if (!input.credentials) {
     const [existing] = await db.select().from(connections).where(and(eq(connections.workspaceId, input.workspaceId), eq(connections.appId, input.appId)));

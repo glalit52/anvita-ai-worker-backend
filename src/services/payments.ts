@@ -1,3 +1,4 @@
+import { issueInvoice } from "./invoices.js";
 import { and, eq, ne } from "drizzle-orm";
 import { config } from "../config.js";
 import { db } from "../db/client.js";
@@ -71,6 +72,7 @@ export async function markPaid(provider: "razorpay" | "stripe", providerRef: str
   const [p] = await db.update(payments).set({ status: "paid", paidAt: new Date() }).where(and(eq(payments.provider, provider), eq(payments.providerRef, providerRef), ne(payments.status, "paid"))).returning();
   if (!p) return null;
   await grant(p.workspaceId, p.credits, "topup", { paymentId: p.id, provider, ...meta });
+  await issueInvoice({ workspaceId: p.workspaceId, kind: "credits", description: `${p.credits.toLocaleString("en-IN")} Anvita credits`, subtotal: basePrice(p.credits), status: "paid", providerRef: `${provider}:${providerRef}` });
   await audit({ workspaceId: p.workspaceId, actor: "System", actorType: "system", action: "billing.topup", target: `${p.credits.toLocaleString("en-IN")} credits via ${provider}`, payload: { paymentId: p.id } });
   await publish({ workspaceId: p.workspaceId, type: "billing.updated", data: await getBalance(p.workspaceId) });
   return p;

@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
+import { handleRazorpaySubscriptionEvent, handleStripeSubscriptionEvent } from "../services/subscriptions.js";
 import { markPaid, verifyRazorpayWebhook, verifyStripeWebhook } from "../services/payments.js";
 
 /** Payment provider webhooks (public, signature-verified, idempotent). */
@@ -16,6 +17,10 @@ export const billingHookRoutes: FastifyPluginAsync = async (app) => {
   app.post("/hooks/razorpay", { schema: { hide: true }, config: { rateLimit: false } }, async (req, reply) => {
     if (!verifyRazorpayWebhook(raw(req), req.headers["x-razorpay-signature"] as string | undefined)) return reply.status(401).send({ error: { code: "unauthorized", message: "Bad signature" } });
     const body = req.body as { event: string; payload?: { payment?: { entity?: { order_id?: string; id?: string } }; order?: { entity?: { id?: string } } } };
+    if (body.event.startsWith("subscription.")) {
+      await handleRazorpaySubscriptionEvent(body.event, body.payload as never);
+      return { ok: true };
+    }
     if (body.event === "order.paid" || body.event === "payment.captured") {
       const orderId = body.payload?.order?.entity?.id ?? body.payload?.payment?.entity?.order_id;
       if (orderId) await markPaid("razorpay", orderId, { razorpayPaymentId: body.payload?.payment?.entity?.id });
@@ -25,7 +30,12 @@ export const billingHookRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/hooks/stripe", { schema: { hide: true }, config: { rateLimit: false } }, async (req, reply) => {
     if (!verifyStripeWebhook(raw(req), req.headers["stripe-signature"] as string | undefined)) return reply.status(401).send({ error: { code: "unauthorized", message: "Bad signature" } });
-    const body = req.body as { type: string; data?: { object?: { id?: string; payment_status?: string } } };
+    const body = req.body as { type: string; data?: { object?: { id?: string; payment_status?: string; mode?: string } } };
+    if (body.type.startsWith("invoice.") || body.type.startsWith("customer.subscription.")) {
+      await handleStripeSubscriptionEvent(body.type, (body.data?.object ?? {}) as never);
+      return { received: true };
+    }
+    if (body.data?.object?.mode === "subscription") return { received: true }; // the invoice.paid event activates it
     if ((body.type === "checkout.session.completed" || body.type === "checkout.session.async_payment_succeeded") && body.data?.object?.id && body.data.object.payment_status === "paid") await markPaid("stripe", body.data.object.id);
     return { received: true };
   });

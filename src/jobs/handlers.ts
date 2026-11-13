@@ -12,6 +12,7 @@ import { applyRetention } from "../services/retention.js";
 import { publish } from "../services/events.js";
 import { serializeApproval } from "../services/serializers.js";
 import { deliverWebhook } from "../services/webhooks.js";
+import { billingCycle } from "../services/subscriptions.js";
 import { cronMatches, startWorkerRun } from "../services/workers.js";
 import { enqueue, registerJob } from "./queue.js";
 
@@ -22,6 +23,9 @@ export function registerJobHandlers() {
   registerJob("slack.event", (p, { log }) => handleSlackEvent(p as unknown as SlackEventEnvelope, log));
   registerJob("whatsapp.message", (p, { log }) => handleWhatsAppMessage(p as unknown as WaChange, log));
   registerJob("channel.deliver", (p) => deliverRun(String(p.runId)));
+  registerJob("billing.cycle", async () => {
+    await billingCycle();
+  });
   registerJob("retention.apply", async () => {
     await applyRetention();
   });
@@ -61,6 +65,7 @@ export async function schedulerTick(log: FastifyBaseLogger, now = new Date()) {
   if (now.getUTCMinutes() % 10 === 0) await enqueue("kb.embed", {}, { dedupeKey: `kb.embed:${minute.toISOString()}` }).catch(() => {});
 
   // Daily, 02:35 IST: delete content past each workspace's retention period.
+  if (now.getUTCHours() === 0 && now.getUTCMinutes() === 15) await enqueue("billing.cycle", {}, { dedupeKey: `billing:${minute.toISOString()}` }).catch(() => {});
   if (now.getUTCHours() === 21 && now.getUTCMinutes() === 5) await enqueue("retention.apply", {}, { dedupeKey: `retention:${minute.toISOString()}` }).catch(() => {});
 
   if (now.getUTCMinutes() === 0) {

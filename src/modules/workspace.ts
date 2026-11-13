@@ -1,4 +1,5 @@
 import { and, asc, eq, ne, sql } from "drizzle-orm";
+import { assertFeature, assertLimit } from "../services/plans.js";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { config } from "../config.js";
@@ -44,6 +45,10 @@ export const workspaceRoutes: FastifyPluginAsyncZod = async (app) => {
   app.patch("/workspace/settings", { preHandler: app.authorize("workspace:manage"), schema: { tags, body: z.record(z.string().max(100), z.union([z.string().max(2000), z.number(), z.boolean()])) } }, async (req) => {
     const a = auth(req);
     const b = req.body;
+    // Plan features
+    if (b["security.ipAllowlist"] === true) await assertFeature(a.workspaceId, "ipAllowlist");
+    if (b["security.piiRedaction"] === true) await assertFeature(a.workspaceId, "piiRedaction");
+    if (Number(b["security.retentionDays"] ?? 0) > 0) await assertFeature(a.workspaceId, "dataRetention");
     // Security settings are enforced by the API, so check them before saving.
     if (b["security.ipRanges"] !== undefined || b["security.ipAllowlist"] === true) {
       const [cur] = await db.select({ settings: workspaces.settings }).from(workspaces).where(eq(workspaces.id, a.workspaceId));
@@ -81,6 +86,7 @@ export const workspaceRoutes: FastifyPluginAsyncZod = async (app) => {
     if (req.body.role === "owner" && a.role !== "owner") throw forbidden("Only owners can invite owners");
     const [dup] = await db.select({ id: memberships.id }).from(memberships).where(and(eq(memberships.workspaceId, a.workspaceId), sql`lower(${memberships.email}) = ${req.body.email}`));
     if (dup) throw conflict("This person is already a member or invited");
+    await assertLimit(a.workspaceId, "members");
     const token = `inv_${randomString(40)}`;
     const [m] = await db.insert(memberships).values({ id: newId("mem"), workspaceId: a.workspaceId, email: req.body.email, name: req.body.name, role: req.body.role, status: "invited", inviteTokenHash: sha256(token), invitedBy: a.userId }).returning();
     const [ws] = await db.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, a.workspaceId));

@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { assertLimit } from "../services/plans.js";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { blankWorker, compileThread, workerFromDescription, workerFromTemplate } from "../catalog/factory.js";
@@ -138,6 +139,7 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
       },
     },
     async (req, reply) => {
+      await assertLimit(auth(req).workspaceId, "workers");
       const a = auth(req);
       const { id: clientId, createdFrom, from, templateId, threadId, scheduleLabel, ...overrides } = req.body;
       let base: Worker;
@@ -226,6 +228,7 @@ export const workerRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.post("/workers/:id/duplicate", { preHandler: app.authorize("workers:write"), schema: { tags, params: idParam, body: z.object({ id: z.string().regex(CLIENT_ID_RE).optional() }).default({}) } }, async (req, reply) => {
     const a = auth(req);
+    await assertLimit(a.workspaceId, "workers");
     const w = await loadWorker(a.workspaceId, req.params.id);
     const [copy] = await db.insert(workers).values({ ...w, id: req.body.id ?? newId("wrk"), name: `${w.name} (copy)`, status: "draft", version: 0, ownerId: a.userId, ownerName: a.userName, pinned: false, webhookSecret: `whsec_${randomString(32)}`, lastScheduledAt: null, createdAt: new Date(), updatedAt: new Date() }).returning();
     await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "worker.created", target: `${copy.name} (duplicate)`, ip: req.ip });

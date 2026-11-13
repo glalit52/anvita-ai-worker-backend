@@ -1,4 +1,5 @@
 import { and, arrayOverlaps, asc, count, eq, ne, sql } from "drizzle-orm";
+import { assertFeature } from "../services/plans.js";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
@@ -129,6 +130,7 @@ export const enterpriseRoutes: FastifyPluginAsyncZod = async (app) => {
       const a = auth(req);
       const cur = await ssoConfigFor(a.workspaceId);
       const b = req.body;
+      if (b.enabled) await assertFeature(a.workspaceId, "saml");
       if (b.entryPoint) await assertPublicUrl(b.entryPoint);
       const idpCert = b.idpCert === undefined ? cur?.idpCert ?? null : b.idpCert ? normaliseCerts(b.idpCert).join("\n") : null;
       const domains = b.domains ?? cur?.domains ?? [];
@@ -168,6 +170,7 @@ export const enterpriseRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.post("/workspace/scim-token", { preHandler: app.authorize("workspace:manage"), schema: { tags } }, async (req, reply) => {
     const a = auth(req);
+    await assertFeature(a.workspaceId, "scim");
     const token = `scim_${randomString(40)}`;
     const values = { scimTokenHash: sha256(token), scimTokenHint: token.slice(-4), updatedAt: new Date() };
     await db.insert(ssoConfigs).values({ workspaceId: a.workspaceId, ...values }).onConflictDoUpdate({ target: ssoConfigs.workspaceId, set: values });

@@ -5,6 +5,7 @@ import { connections, memberships, policies, workspaces } from "../db/schema.js"
 import { newId, randomString, slugify } from "../lib/ids.js";
 import { audit } from "./audit.js";
 import { grant } from "./credits.js";
+import { startTrial } from "./subscriptions.js";
 
 /** Policies every new workspace starts with (safe defaults from the product spec). */
 export const DEFAULT_POLICIES = [
@@ -25,7 +26,8 @@ export async function createWorkspace(tx: Tx, input: { name: string; owner: { us
   await tx.insert(memberships).values({ id: newId("mem"), workspaceId: id, userId: input.owner.userId, email: input.owner.email, name: input.owner.name, role: "owner", status: "active", lastActiveAt: new Date() });
   await tx.insert(policies).values(DEFAULT_POLICIES.map((p) => ({ ...p, id: newId("pol"), workspaceId: id })));
   await tx.insert(connections).values(["web", "sandbox"].map((appId) => ({ id: newId("con"), workspaceId: id, appId, scope: "workspace" as const, connectedByName: "System" })));
-  await grant(id, config.DEFAULT_PLAN_CREDITS, "plan_grant", { plan: "Business" }, tx);
+  await startTrial(id, tx);
+  await grant(id, config.DEFAULT_PLAN_CREDITS, "plan_grant", { plan: "business", trial: true }, tx);
   await audit({ workspaceId: id, actor: input.owner.name, actorId: input.owner.userId, action: "workspace.created", target: input.name }, tx);
   return id;
 }

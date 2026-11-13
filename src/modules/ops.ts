@@ -2,7 +2,7 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { db } from "../db/client.js";
-import { approvals, creditLedger, inboxConversations, messages, payments, runs, threads, workers, workspaces } from "../db/schema.js";
+import { invoices, approvals, creditLedger, inboxConversations, messages, payments, runs, threads, workers, workspaces } from "../db/schema.js";
 import { sendToChannel } from "../channels/deliver.js";
 import { AppError, assertFound, badRequest, conflict } from "../lib/errors.js";
 import { config } from "../config.js";
@@ -13,6 +13,9 @@ import { audit } from "../services/audit.js";
 import { getBalance, grant, usageByDay } from "../services/credits.js";
 import { publish } from "../services/events.js";
 import { serializeInbox, serializeMessage } from "../services/serializers.js";
+import { FEATURE_LABEL, periodPrice, PLANS, usage } from "../services/plans.js";
+import { cancelSubscription, getSubscription, resumeSubscription, subscribe } from "../services/subscriptions.js";
+import { billingProfile, GSTIN_RE, invoicePdf, listInvoices, serializeInvoice } from "../services/invoices.js";
 
 export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
   const idParam = z.object({ id: z.string() });
@@ -21,7 +24,76 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
   app.get("/billing", { preHandler: app.authorize("workspace:read"), schema: { tags: ["billing"] } }, async (req) => {
     const a = auth(req);
     const [ws] = await db.select().from(workspaces).where(eq(workspaces.id, a.workspaceId));
-    return { plan: ws.plan, renewsOn: ws.renewsAt?.toISOString() ?? null, ...(await getBalance(a.workspaceId)), usageByDay: await usageByDay(a.workspaceId, 30) };
+    const sub = await getSubscription(a.workspaceId);
+    return { plan: ws.plan, renewsOn: ws.renewsAt?.toISOString() ?? null, subscription: serializeSub(sub), ...(await getBalance(a.workspaceId)), usageByDay: await usageByDay(a.workspaceId, 30) };
+  });
+
+  // ─── Plans, subscription, invoices ───
+  const serializeSub = (s: Awaited<ReturnType<typeof getSubscription>>) => ({
+    plan: s.plan,
+    interval: s.interval,
+    status: s.status,
+    provider: s.provider,
+    currentPeriodStart: s.currentPeriodStart.toISOString(),
+    currentPeriodEnd: s.currentPeriodEnd.toISOString(),
+    trialEndsAt: s.trialEndsAt?.toISOString() ?? null,
+    cancelAtPeriodEnd: s.cancelAtPeriodEnd,
+    pendingPlan: s.pendingPlan,
+  });
+
+  app.get("/billing/plans", { preHandler: app.authorize("workspace:read"), schema: { tags: ["billing"] } }, async (req) => {
+    const a = auth(req);
+    return {
+      plans: PLANS.map((p) => ({ ...p, yearlyPrice: p.price === null ? null : periodPrice(p, "year"), featureLabels: p.features.map((f) => FEATURE_LABEL[f]) })),
+      subscription: serializeSub(await getSubscription(a.workspaceId)),
+      usage: await usage(a.workspaceId),
+      providers: providers(),
+      currency: config.BILLING_CURRENCY.toUpperCase(),
+    };
+  });
+
+  app.post("/billing/subscribe", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], body: z.object({ plan: z.enum(["starter", "growth", "business", "enterprise"]), interval: z.enum(["month", "year"]).default("month"), provider: z.enum(["razorpay", "stripe"]).optional() }) } }, async (req) => {
+    const a = auth(req);
+    const r = await subscribe(a.workspaceId, { ...req.body, actor: { id: a.userId, name: a.userName } });
+    await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "billing.subscribe", target: `${req.body.plan} (${req.body.interval}ly) · ${r.mode}`, ip: req.ip });
+    return { ...r, subscription: serializeSub(await getSubscription(a.workspaceId)) };
+  });
+
+  app.post("/billing/subscription/cancel", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"] } }, async (req) => serializeSub(await cancelSubscription(auth(req).workspaceId, auth(req).userName)));
+  app.post("/billing/subscription/resume", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"] } }, async (req) => serializeSub(await resumeSubscription(auth(req).workspaceId, auth(req).userName)));
+
+  app.get("/billing/invoices", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"] } }, async (req) => ({ data: (await listInvoices(auth(req).workspaceId)).map(serializeInvoice) }));
+
+  app.get("/billing/invoices/:id/pdf", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], params: idParam } }, async (req, reply) => {
+    const [inv] = await db.select().from(invoices).where(and(eq(invoices.id, req.params.id), eq(invoices.workspaceId, auth(req).workspaceId)));
+    assertFound(inv, "Invoice");
+    const pdf = await invoicePdf(inv);
+    return reply.header("Content-Type", "application/pdf").header("Content-Disposition", `attachment; filename="${inv.number.replaceAll("/", "-")}.pdf"`).send(pdf);
+  });
+
+  const profileBody = z.object({
+    legalName: z.string().trim().max(200).optional(),
+    gstin: z.string().trim().toUpperCase().max(15).optional(),
+    address: z.string().trim().max(500).optional(),
+    stateCode: z.string().regex(/^\d{2}$/).optional(),
+    country: z.string().trim().length(2).toUpperCase().optional(),
+    email: z.string().trim().email().or(z.literal("")).optional(),
+  });
+  app.get("/billing/profile", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"] } }, async (req) => billingProfile(auth(req).workspaceId));
+  app.put("/billing/profile", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], body: profileBody } }, async (req) => {
+    const a = auth(req);
+    const b = { ...req.body };
+    if (b.gstin) {
+      if (!GSTIN_RE.test(b.gstin)) throw badRequest("That doesn't look like a valid GSTIN (15 characters, e.g. 29ABCDE1234F1Z5)");
+      b.stateCode = b.gstin.slice(0, 2);
+      b.country = "IN";
+    }
+    const [ws] = await db.select({ settings: workspaces.settings }).from(workspaces).where(eq(workspaces.id, a.workspaceId));
+    const next = { ...(ws.settings as Record<string, string | number | boolean>) };
+    for (const [k, v] of Object.entries(b)) if (v !== undefined) next[`billing.${k}`] = v as string;
+    await db.update(workspaces).set({ settings: next }).where(eq(workspaces.id, a.workspaceId));
+    await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "billing.profile_updated", target: b.legalName ?? b.gstin ?? "billing details", ip: req.ip });
+    return billingProfile(a.workspaceId);
   });
 
   app.get("/billing/ledger", { preHandler: app.authorize("billing:manage"), schema: { tags: ["billing"], querystring: z.object({ limit: z.coerce.number().int().min(1).max(500).default(100) }) } }, async (req) => {
