@@ -10,6 +10,7 @@ import { assertFound, badRequest, conflict, forbidden } from "../lib/errors.js";
 import { newId, randomString } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
+import { forgetModelSettings } from "../services/model-settings.js";
 import { forgetPolicy, ipAllowed, policyFrom, validRange } from "../services/security.js";
 import { revokeAllSessions } from "../services/sessions.js";
 import { getBalance } from "../services/credits.js";
@@ -70,6 +71,7 @@ export const workspaceRoutes: FastifyPluginAsyncZod = async (app) => {
     }
     const [ws] = await db.update(workspaces).set({ settings: sql`${workspaces.settings} || ${JSON.stringify(req.body)}::jsonb` }).where(eq(workspaces.id, a.workspaceId)).returning({ settings: workspaces.settings });
     forgetPolicy(a.workspaceId);
+    forgetModelSettings(a.workspaceId);
     await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "settings.updated", target: Object.keys(req.body).join(", "), ip: req.ip });
     return ws.settings;
   });

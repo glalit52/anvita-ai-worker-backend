@@ -348,6 +348,7 @@ export async function runAgentLoop(run: Run, state: AgentState, w: MessageWriter
     let textBlock: { type: "text"; text: string } | null = null;
     const started = new Date();
     const turn = await callModel({
+      workspaceId: run.workspaceId,
       tier: o.tier,
       system: o.system,
       messages: state.transcript,
@@ -365,7 +366,7 @@ export async function runAgentLoop(run: Run, state: AgentState, w: MessageWriter
         : undefined,
     });
     state.turns++;
-    const credits = tokenCredits(turn.model, turn.usage);
+    const credits = turn.byoKey ? 0 : tokenCredits(turn.model, turn.usage);
     await charge(run.workspaceId, credits, { type: "run", id: run.id }, { model: turn.model, usage: turn.usage });
     await db.update(runs).set({ creditsUsed: sql`${runs.creditsUsed} + ${credits}` }).where(eq(runs.id, run.id));
     await recordStep(run, 1000 + state.turns, { kind: "llm", name: "model.turn", label: `Model turn ${state.turns}`, status: "done", model: turn.model, tokens: turn.usage, credits, startedAt: started });

@@ -61,6 +61,10 @@ export const workspaces = pgTable("workspaces", {
   settings: jsonb("settings").$type<Record<string, string | number | boolean>>().notNull().default({}),
   installedPacks: text("installed_packs").array().notNull().default(sql`'{}'::text[]`),
   renewsAt: ts("renews_at"),
+  /** Bring-your-own Anthropic API key (AES-GCM). Calls for this workspace use it; tokens aren't charged as credits. */
+  modelKeyEnc: text("model_key_enc"),
+  modelKeyHint: text("model_key_hint"),
+  modelKeyAddedAt: ts("model_key_added_at"),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("workspaces_slug_uq").on(t.slug)]);
 

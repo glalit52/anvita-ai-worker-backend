@@ -297,5 +297,4 @@ export const chatRoutes: FastifyPluginAsyncZod = async (app) => {
     await pump();
   });
 
-  app.get("/models", { preHandler: app.authorize("workspace:read"), schema: { tags: ["runs"] } }, async () => ({ act: config.MODEL_ACT, plan: config.MODEL_PLAN, fast: config.MODEL_FAST }));
 };

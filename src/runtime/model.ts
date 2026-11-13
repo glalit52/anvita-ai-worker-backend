@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config, modelProvider } from "../config.js";
 import { toolByName, type TOOLS } from "./tools/index.js";
+import { modelSettings, routeTier } from "../services/model-settings.js";
 
 /**
  * Model Router (architecture §4.4). All LLM calls go through `callModel`, which picks the
@@ -13,6 +14,8 @@ export type ToolResultParam = Anthropic.Beta.BetaToolResultBlockParam;
 
 export interface ModelTurn {
   model: string;
+  /** Billed to the workspace's own API key (no token credits). */
+  byoKey?: boolean;
   content: ContentBlock[];
   stopReason: string | null;
   usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null };
@@ -20,6 +23,8 @@ export interface ModelTurn {
 
 export interface ModelCall {
   tier: "act" | "plan" | "fast";
+  /** Applies the workspace's model settings (routing, web browsing, fallback, own API key). */
+  workspaceId?: string;
   system: string;
   messages: MessageParam[];
   tools: typeof TOOLS;
@@ -32,13 +37,19 @@ export function modelFor(tier: ModelCall["tier"]): string {
   return tier === "plan" ? config.MODEL_PLAN : tier === "fast" ? config.MODEL_FAST : config.MODEL_ACT;
 }
 
-let client: Anthropic | null = null;
-function anthropic() {
-  client ??= new Anthropic({ apiKey: config.ANTHROPIC_API_KEY, maxRetries: 3, timeout: 10 * 60_000 });
-  return client;
+// One client per API key: the platform key, plus each workspace's own key.
+const clients = new Map<string, Anthropic>();
+function anthropic(apiKey = config.ANTHROPIC_API_KEY ?? "") {
+  let c = clients.get(apiKey);
+  if (!c) {
+    c = new Anthropic({ apiKey: apiKey || undefined, maxRetries: 3, timeout: 10 * 60_000 });
+    if (clients.size > 500) clients.clear();
+    clients.set(apiKey, c);
+  }
+  return c;
 }
 
-async function callAnthropic(call: ModelCall): Promise<ModelTurn> {
+async function callAnthropic(call: ModelCall, opts: { apiKey?: string | null; fallback: boolean } = { fallback: true }): Promise<ModelTurn> {
   const model = modelFor(call.tier);
   const tools: Anthropic.Beta.BetaToolUnion[] = call.tools.map((t, i) => ({
     name: t.name,
@@ -49,7 +60,7 @@ async function callAnthropic(call: ModelCall): Promise<ModelTurn> {
   }));
   if (call.webSearch) tools.push({ type: "web_search_20260209", name: "web_search", max_uses: 5, cache_control: { type: "ephemeral" } });
 
-  const stream = anthropic().beta.messages.stream(
+  const stream = anthropic(opts.apiKey ?? undefined).beta.messages.stream(
     {
       model,
       max_tokens: config.AGENT_MAX_TOKENS,
@@ -58,14 +69,13 @@ async function callAnthropic(call: ModelCall): Promise<ModelTurn> {
       tools,
       output_config: { effort: "medium" },
       // Server-side refusal fallback: the API re-routes a declined request to a suitable model in the same call.
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
+      ...(opts.fallback ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
     },
     { signal: call.signal },
   );
   if (call.onText) stream.on("text", (d) => call.onText!(d));
   const msg = await stream.finalMessage();
-  return { model: msg.model, content: msg.content, stopReason: msg.stop_reason, usage: msg.usage };
+  return { model: msg.model, content: msg.content, stopReason: msg.stop_reason, usage: msg.usage, byoKey: !!opts.apiKey };
 }
 
 // ─── Scripted provider ─────────────────────────────────────────────────────────
@@ -215,7 +225,11 @@ async function callScripted(call: ModelCall): Promise<ModelTurn> {
 }
 
 export async function callModel(call: ModelCall): Promise<ModelTurn> {
-  return modelProvider() === "anthropic" ? callAnthropic(call) : callScripted(call);
+  const s = await modelSettings(call.workspaceId);
+  const routed: ModelCall = { ...call, tier: routeTier(call.tier, s), webSearch: !!call.webSearch && s.webBrowsing };
+  // A workspace's own key always calls Claude, even on servers running the offline model.
+  if (s.apiKey) return callAnthropic(routed, { apiKey: s.apiKey, fallback: s.fallback });
+  return modelProvider() === "anthropic" ? callAnthropic(routed, { fallback: s.fallback }) : callScripted(routed);
 }
 
 export { toolByName };

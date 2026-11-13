@@ -27,18 +27,19 @@ export async function runWorkerEvals(workspaceId: string, workerId: string) {
   const system = `You are the AI Worker “${w.name}”. ${w.description}\n${w.instructions}\nThis is an evaluation run: tools are disabled. Describe exactly what you would do (which actions, which approvals) and give the reply you would send.`;
   for (const c of cases) {
     const started = Date.now();
-    const out = await callModel({ tier: "act", system, messages: [{ role: "user", content: c.input }], tools: [] });
+    const out = await callModel({ workspaceId, tier: "act", system, messages: [{ role: "user", content: c.input }], tools: [] });
     const answer = text(out.content);
-    let credits = tokenCredits(out.model, out.usage);
+    let credits = out.byoKey ? 0 : tokenCredits(out.model, out.usage);
     let score: number;
     if (modelProvider() === "anthropic") {
       const judge = await callModel({
+        workspaceId,
         tier: "fast",
         system: "You grade an AI agent's response against the expected behaviour. Reply with only a JSON object: {\"score\": number between 0 and 1, \"reason\": string}.",
         messages: [{ role: "user", content: `<input>${c.input}</input>\n<expected>${c.expected}</expected>\n<response>${answer}</response>` }],
         tools: [],
       });
-      credits += tokenCredits(judge.model, judge.usage);
+      credits += judge.byoKey ? 0 : tokenCredits(judge.model, judge.usage);
       const m = /\{[\s\S]*\}/.exec(text(judge.content));
       score = m ? Math.max(0, Math.min(1, Number((JSON.parse(m[0]) as { score: number }).score) || 0)) : 0;
     } else {

@@ -106,6 +106,13 @@
       "when": 1794592154318,
       "tag": "0014_channel_endpoints",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1794593053295,
+      "tag": "0015_model_settings",
+      "breakpoints": true
     }
   ]
 }

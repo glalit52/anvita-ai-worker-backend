@@ -231,8 +231,8 @@ function tierFor(model: unknown): "act" | "plan" | "fast" {
 /** One-shot JSON call (input mapping, AI routing). Charged and recorded like any model turn. */
 async function jsonCall(ex: Exec, label: string, system: string, user: string, tier: "act" | "plan" | "fast" = "fast"): Promise<Record<string, unknown> | null> {
   const started = new Date();
-  const turn = await callModel({ tier, system, messages: [{ role: "user", content: user }], tools: [] });
-  const credits = tokenCredits(turn.model, turn.usage);
+  const turn = await callModel({ workspaceId: ex.run.workspaceId, tier, system, messages: [{ role: "user", content: user }], tools: [] });
+  const credits = turn.byoKey ? 0 : tokenCredits(turn.model, turn.usage);
   await charge(ex.run.workspaceId, credits, { type: "run", id: ex.run.id }, { model: turn.model, usage: turn.usage });
   await recordStep(ex.run, nextSeq(), { kind: "llm", name: "workflow.json", label, status: "done", model: turn.model, tokens: turn.usage, credits, startedAt: started });
   const text = turn.content.filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join("");

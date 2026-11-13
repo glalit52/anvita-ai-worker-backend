@@ -2,10 +2,12 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { db } from "../db/client.js";
-import { invoices, approvals, creditLedger, inboxConversations, messages, payments, runs, threads, workers, workspaces } from "../db/schema.js";
+import { runSteps, invoices, approvals, creditLedger, inboxConversations, messages, payments, runs, threads, workers, workspaces } from "../db/schema.js";
 import { sendToChannel } from "../channels/deliver.js";
 import { AppError, assertFound, badRequest, conflict } from "../lib/errors.js";
-import { config } from "../config.js";
+import { config, modelProvider } from "../config.js";
+import { modelFor } from "../runtime/model.js";
+import { modelSettings, saveApiKey, validateApiKey } from "../services/model-settings.js";
 import { basePrice, createCheckout, discountFor, markPaid, PACKS, priceFor, providers, verifyRazorpayPayment } from "../services/payments.js";
 import { newId } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
@@ -26,6 +28,56 @@ export const opsRoutes: FastifyPluginAsyncZod = async (app) => {
     const [ws] = await db.select().from(workspaces).where(eq(workspaces.id, a.workspaceId));
     const sub = await getSubscription(a.workspaceId);
     return { plan: ws.plan, renewsOn: ws.renewsAt?.toISOString() ?? null, subscription: serializeSub(sub), ...(await getBalance(a.workspaceId)), usageByDay: await usageByDay(a.workspaceId, 30) };
+  });
+
+  // ─── Models (Settings → Models & data) ───
+  app.get("/models", { preHandler: app.authorize("workspace:read"), schema: { tags: ["models"] } }, async (req) => {
+    const a = auth(req);
+    const s = await modelSettings(a.workspaceId);
+    const [ws] = await db.select({ hint: workspaces.modelKeyHint, addedAt: workspaces.modelKeyAddedAt }).from(workspaces).where(eq(workspaces.id, a.workspaceId));
+    const since = new Date(Date.now() - 30 * 86400_000);
+    const rows = await db
+      .select({ model: runSteps.model, calls: sql<number>`count(*)::int`, credits: sql<number>`coalesce(sum(${runSteps.credits}),0)::int` })
+      .from(runSteps)
+      .where(and(eq(runSteps.workspaceId, a.workspaceId), eq(runSteps.kind, "llm"), gte(runSteps.startedAt, since)))
+      .groupBy(runSteps.model);
+    const total = rows.reduce((n, r) => n + r.calls, 0);
+    const share = (tier: "fast" | "act" | "plan") => {
+      const id = modelFor(tier);
+      const calls = rows.filter((r) => r.model === id || (r.model ?? "").startsWith(id)).reduce((n, r) => n + r.calls, 0);
+      return { calls, share: total ? calls / total : 0 };
+    };
+    return {
+      provider: s.apiKey ? "byo" : modelProvider(),
+      act: config.MODEL_ACT,
+      plan: config.MODEL_PLAN,
+      fast: config.MODEL_FAST,
+      tiers: [
+        { id: "fast", model: modelFor("fast"), enabled: s.fast, ...share("fast") },
+        { id: "balanced", model: modelFor("act"), enabled: true, ...share("act") },
+        { id: "precise", model: modelFor("plan"), enabled: s.precise, ...share("plan") },
+      ],
+      routing: s.routing,
+      webBrowsing: s.webBrowsing,
+      fallback: s.fallback,
+      apiKey: ws?.hint ? { last4: ws.hint, addedAt: ws.addedAt?.toISOString() ?? null } : null,
+      totalCalls30d: total,
+    };
+  });
+
+  app.put("/models/key", { preHandler: app.authorize("workspace:manage"), schema: { tags: ["models"], body: z.object({ apiKey: z.string().trim().min(20).max(400) }) } }, async (req) => {
+    const a = auth(req);
+    const models = await validateApiKey(req.body.apiKey);
+    await saveApiKey(a.workspaceId, req.body.apiKey);
+    await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "models.key_added", target: `Anthropic key …${req.body.apiKey.slice(-4)}`, ip: req.ip });
+    return { last4: req.body.apiKey.slice(-4), models };
+  });
+
+  app.delete("/models/key", { preHandler: app.authorize("workspace:manage"), schema: { tags: ["models"] } }, async (req, reply) => {
+    const a = auth(req);
+    await saveApiKey(a.workspaceId, null);
+    await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "models.key_removed", target: "Anthropic key", ip: req.ip });
+    return reply.status(204).send();
   });
 
   // ─── Plans, subscription, invoices ───
