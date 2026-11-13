@@ -39,6 +39,8 @@ export const users = pgTable("users", {
   approvalChannel: text("approval_channel").notNull().default("email"),
   digest: text("digest").notNull().default("daily"),
   quietHours: boolean("quiet_hours").notNull().default(false),
+  /** E.164 digits without "+", for WhatsApp approval requests. */
+  phone: text("phone"),
   /** Two-step verification (TOTP, RFC 6238). Secrets are AES-GCM encrypted; recovery codes stored as SHA-256. */
   mfaEnabled: boolean("mfa_enabled").notNull().default(false),
   totpSecretEnc: text("totp_secret_enc"),
@@ -292,6 +294,8 @@ export const runSteps = pgTable("run_steps", {
   endedAt: ts("ended_at"),
 }, (t) => [index("run_steps_run_idx").on(t.runId, t.seq)]);
 
+export type ApprovalAlert = { kind: "email"; to: string } | { kind: "slack"; channel: string; ts: string } | { kind: "whatsapp"; to: string } | { kind: "push"; userId: string };
+
 export const approvals = pgTable("approvals", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -314,6 +318,8 @@ export const approvals = pgTable("approvals", {
   decidedBy: text("decided_by"),
   decidedAt: ts("decided_at"),
   expiresAt: ts("expires_at").notNull(),
+  /** Where approvers were alerted (Slack messages to update once decided, emails, WhatsApp). */
+  alerts: jsonb("alerts").$type<ApprovalAlert[]>().notNull().default([]),
   createdAt: createdAt(),
 }, (t) => [index("approvals_ws_status_idx").on(t.workspaceId, t.status, t.createdAt)]);
 
@@ -705,3 +711,14 @@ export const jobs = pgTable("jobs", {
   index("jobs_ready_idx").on(t.status, t.runAt),
   uniqueIndex("jobs_dedupe_uq").on(t.dedupeKey).where(sql`${t.dedupeKey} is not null and ${t.status} in ('queued','running')`),
 ]);
+
+/** Browser push subscriptions (Web Push / VAPID), per user and device. */
+export const pushSubscriptions = pgTable("push_subscriptions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  endpoint: text("endpoint").notNull(),
+  p256dh: text("p256dh").notNull(),
+  auth: text("auth").notNull(),
+  userAgent: text("user_agent"),
+  createdAt: createdAt(),
+}, (t) => [uniqueIndex("push_subscriptions_endpoint_uq").on(t.endpoint), index("push_subscriptions_user_idx").on(t.userId)]);

@@ -192,5 +192,5 @@ export function serializeEvalCase(e: typeof S.evalCases.$inferSelect): C.EvalCas
 }
 
 export function serializeUser(u: typeof S.users.$inferSelect): C.Profile & { id: string } {
-  return { id: u.id, name: u.name, email: u.email, title: u.title, language: u.language as "en" | "hi", timezone: u.timezone, approvalChannel: u.approvalChannel as C.Profile["approvalChannel"], digest: u.digest as C.Profile["digest"], quietHours: u.quietHours };
+  return { id: u.id, name: u.name, email: u.email, title: u.title, language: u.language as "en" | "hi", timezone: u.timezone, approvalChannel: u.approvalChannel as C.Profile["approvalChannel"], digest: u.digest as C.Profile["digest"], quietHours: u.quietHours, phone: u.phone ?? "" };
 }

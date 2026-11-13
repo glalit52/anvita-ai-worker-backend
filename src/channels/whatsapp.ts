@@ -1,3 +1,4 @@
+import { decideApproval, deciderFor } from "../services/approval-alerts.js";
 import { and, eq, inArray } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import { makeCaller } from "../connectors/http.js";
@@ -27,7 +28,7 @@ export interface WaChange {
   value: {
     metadata: { phone_number_id: string; display_phone_number?: string };
     contacts?: { wa_id: string; profile?: { name?: string } }[];
-    messages?: { id: string; from: string; type: string; text?: { body: string }; button?: { text: string }; interactive?: { button_reply?: { title: string }; list_reply?: { title: string } } }[];
+    messages?: { id: string; from: string; type: string; text?: { body: string }; button?: { text: string; payload?: string }; interactive?: { button_reply?: { id?: string; title: string }; list_reply?: { title: string } } }[];
   };
 }
 
@@ -42,6 +43,23 @@ export async function handleWhatsAppMessage(change: WaChange, log: FastifyBaseLo
   const conn = await connectionByExternalId("whatsapp", v.metadata.phone_number_id);
   if (!conn) return log.warn({ phone: v.metadata.phone_number_id }, "whatsapp message for unknown number");
   for (const m of v.messages ?? []) {
+    // Approve / Reject reply buttons on an approval request.
+    const choice = m.interactive?.button_reply?.id ?? m.button?.payload;
+    if (choice?.startsWith("apr:")) {
+      const [, approvalId, decision] = choice.split(":");
+      const who = await deciderFor(conn.workspaceId, { phone: m.from });
+      if (!who) {
+        await sendWhatsApp(conn, m.from, "This number isn't linked to an Anvita member. Add it in Settings → Profile.");
+        continue;
+      }
+      try {
+        const row = await decideApproval(conn.workspaceId, approvalId, who, decision === "approved" ? "approved" : "rejected", { via: "whatsapp" });
+        await sendWhatsApp(conn, m.from, `${row.status === "approved" ? "✅ Approved" : "❌ Rejected"}: ${row.title}`);
+      } catch (e) {
+        await sendWhatsApp(conn, m.from, (e as Error).message);
+      }
+      continue;
+    }
     const text = m.text?.body ?? m.button?.text ?? m.interactive?.button_reply?.title ?? m.interactive?.list_reply?.title;
     if (!text) {
       await sendWhatsApp(conn, m.from, "Sorry, I can only read text messages right now.");

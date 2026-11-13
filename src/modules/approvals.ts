@@ -11,7 +11,8 @@ import { audit } from "../services/audit.js";
 import { publish } from "../services/events.js";
 import { roleAtLeast } from "../services/rbac.js";
 import { serializeApproval } from "../services/serializers.js";
-import { emitWebhook } from "../services/webhooks.js";
+import { config } from "../config.js";
+import { decideApproval, deciderFor, readDecisionToken } from "../services/approval-alerts.js";
 
 export const approvalRoutes: FastifyPluginAsyncZod = async (app) => {
   const tags = ["approvals"];
@@ -39,26 +40,45 @@ export const approvalRoutes: FastifyPluginAsyncZod = async (app) => {
     { preHandler: app.authorize("approvals:decide"), schema: { tags, params: z.object({ id: z.string() }), body: z.object({ decision: z.enum(["approved", "rejected"]), payload: z.record(z.string(), z.unknown()).optional(), note: z.string().max(1000).optional() }) } },
     async (req) => {
       const a = auth(req);
-      const row = assertFound((await db.select().from(approvals).where(and(eq(approvals.id, req.params.id), eq(approvals.workspaceId, a.workspaceId))))[0], "Approval");
-      if (row.approverRole && !roleAtLeast(a.role, row.approverRole)) throw forbidden(`This approval needs a ${row.approverRole} or above`);
-      if (row.status !== "pending") throw conflict(`Already ${row.status}${row.decidedBy ? ` by ${row.decidedBy}` : ""}`);
-
-      const patch: Partial<typeof approvals.$inferInsert> = { status: req.body.decision, decidedBy: a.userName, decidedAt: new Date() };
-      if (req.body.decision === "approved" && req.body.payload) {
-        const tool = [...toolByName.values()].find((t) => t.action === row.action);
-        patch.payload = { ...row.payload, ...req.body.payload };
-        const re = tool?.approval?.(patch.payload as never, { workspaceId: a.workspaceId, runId: row.runId ?? "", threadId: row.threadId, actor: row.requestedBy, onBehalfOf: { userId: null, name: row.onBehalfOf }, workspaceDomains: [], connection: null });
-        if (re) patch.preview = re.preview;
-      }
-      // Conditional update guards against two approvers racing.
-      const [updated] = await db.update(approvals).set(patch).where(and(eq(approvals.id, row.id), eq(approvals.status, "pending"))).returning();
-      if (!updated) throw conflict("This approval was just decided by someone else");
-
-      await publish({ workspaceId: a.workspaceId, threadId: updated.threadId, runId: updated.runId, type: "approval.updated", data: serializeApproval(updated) });
-      await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: `approval.${req.body.decision}`, target: `${row.action} · ${row.title}`, ip: req.ip, payload: { approvalId: row.id, edited: !!req.body.payload, note: req.body.note } });
-      await emitWebhook(a.workspaceId, "approval.decided", serializeApproval(updated));
-      if (updated.runId) await enqueue("run.advance", { runId: updated.runId }, { maxAttempts: 3 });
+      const updated = await decideApproval(a.workspaceId, req.params.id, { userId: a.userId, name: a.userName, role: a.role }, req.body.decision, { payload: req.body.payload, note: req.body.note, ip: req.ip, via: a.userId ? "web" : "api" });
       return serializeApproval(updated);
     },
   );
+};
+
+const page = (title: string, body: string) =>
+  `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,sans-serif;max-width:520px;margin:12vh auto;padding:0 20px;color:#111}button{font:inherit;padding:10px 20px;border-radius:8px;border:0;color:#fff;cursor:pointer}a{color:#5b4cf0}p{color:#444}</style></head><body>${body}</body></html>`;
+const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+
+/**
+ * One-click approval links from email. GET only shows a confirmation (mail scanners prefetch
+ * links), POST decides. The signed token names the approver, so no sign-in is needed.
+ */
+export const approvalLinkRoutes: FastifyPluginAsyncZod = async (app) => {
+  app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_req, body, done) => done(null, Object.fromEntries(new URLSearchParams(String(body)))));
+  const q = { querystring: z.object({ t: z.string().max(2000) }) };
+  app.get("/approvals/respond", { schema: { hide: true, ...q } }, async (req, reply) => {
+    reply.type("text/html");
+    const t = await readDecisionToken(req.query.t);
+    if (!t) return reply.status(400).send(page("Link expired", "<h2>This link has expired</h2><p>Open Anvita to review the request.</p>"));
+    const [row] = await db.select().from(approvals).where(eq(approvals.id, t.approvalId));
+    if (!row) return reply.status(404).send(page("Not found", "<h2>Request not found</h2>"));
+    if (row.status !== "pending") return page("Already decided", `<h2>${esc(row.title)}</h2><p>Already ${row.status}${row.decidedBy ? ` by ${esc(row.decidedBy)}` : ""}.</p>`);
+    const verb = t.decision === "approved" ? "Approve" : "Reject";
+    return page(`${verb}?`, `<h2>${esc(row.title)}</h2><p>${esc(row.reason)}</p><form method="post"><input type="hidden" name="t" value="${esc(req.query.t)}"><button style="background:${t.decision === "approved" ? "#16a34a" : "#dc2626"}">${verb}</button></form><p><a href="${config.WEB_URL}/approvals?id=${row.id}">Review or edit in Anvita instead</a></p>`);
+  });
+
+  app.post("/approvals/respond", { schema: { hide: true, body: z.object({ t: z.string().max(2000) }) } }, async (req, reply) => {
+    reply.type("text/html");
+    const t = await readDecisionToken(req.body.t);
+    if (!t) return reply.status(400).send(page("Link expired", "<h2>This link has expired</h2>"));
+    const who = await deciderFor(t.workspaceId, { userId: t.userId });
+    if (!who) return reply.status(403).send(page("Not allowed", "<h2>You're no longer a member of this workspace</h2>"));
+    try {
+      const row = await decideApproval(t.workspaceId, t.approvalId, who, t.decision, { ip: req.ip, via: "email" });
+      return page("Done", `<h2>${row.status === "approved" ? "✅ Approved" : "❌ Rejected"}</h2><p>${esc(row.title)}</p><p><a href="${config.WEB_URL}/approvals">Open approvals</a></p>`);
+    } catch (e) {
+      return reply.status(409).send(page("Couldn't decide", `<h2>${esc((e as Error).message)}</h2>`));
+    }
+  });
 };

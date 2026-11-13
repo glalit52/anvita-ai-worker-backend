@@ -5,6 +5,7 @@ import type { Role } from "../db/schema.js";
 import { newId } from "../lib/ids.js";
 import { roleAtLeast } from "./rbac.js";
 import { publish } from "./events.js";
+import { queuePush } from "./push.js";
 
 export interface NotifyInput {
   workspaceId: string;
@@ -23,9 +24,11 @@ export async function notify(input: NotifyInput, tx: Tx = db): Promise<void> {
     const ms = await tx.select({ userId: memberships.userId, role: memberships.role }).from(memberships).where(and(eq(memberships.workspaceId, input.workspaceId), eq(memberships.status, "active")));
     userIds = ms.filter((m) => m.userId && roleAtLeast(m.role, input.minRole ?? "viewer")).map((m) => m.userId!);
   }
-  for (const userId of new Set(userIds)) {
+  const recipients = [...new Set(userIds)];
+  for (const userId of recipients) {
     const row = { id: newId("ntf"), workspaceId: input.workspaceId, userId, appId: input.appId, title: input.title, meta: input.meta ?? "", href: input.href ?? "/", read: false, createdAt: new Date() };
     await tx.insert(notifications).values(row);
     await publish({ workspaceId: input.workspaceId, userId, type: "notification.created", data: row }, tx);
   }
+  await queuePush({ userIds: recipients, title: input.title, body: input.meta ?? "", href: input.href ?? "/", tag: input.href }, tx);
 }

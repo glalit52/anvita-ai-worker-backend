@@ -328,6 +328,8 @@ export interface Profile {
   approvalChannel: "slack" | "whatsapp" | "email";
   digest: "daily" | "weekly" | "off";
   quietHours: boolean;
+  /** WhatsApp number for approval requests (digits with country code). */
+  phone?: string;
 }
 
 export interface EvalCase {

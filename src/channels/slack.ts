@@ -6,6 +6,7 @@ import { db } from "../db/client.js";
 import { memberships } from "../db/schema.js";
 import { startAgentRun } from "../modules/chat.js";
 import { connectionByExternalId, ensureThread } from "./common.js";
+import { decideApproval, deciderFor } from "../services/approval-alerts.js";
 
 /** Slack request signing: v0=hex(hmac_sha256(secret, "v0:<ts>:<raw body>")), rejecting replays older than 5 minutes. */
 export function verifySlackSignature(rawBody: string, ts: string | undefined, sig: string | undefined, secret: string | undefined): boolean {
@@ -59,4 +60,37 @@ export async function postToSlack(conn: NonNullable<Awaited<ReturnType<typeof co
   const call = makeCaller("slack", conn.id, conn.credentials);
   const r = await call<{ ok: boolean; error?: string }>("https://slack.com/api/chat.postMessage", { body: { channel, thread_ts: threadTs, text: text.slice(0, 39_000), unfurl_links: false } });
   if (!r.ok) throw new Error(`Slack: ${r.error}`);
+}
+
+export interface SlackInteraction {
+  type: string;
+  team?: { id: string };
+  user?: { id: string; name?: string };
+  actions?: { action_id: string; value?: string }[];
+  response_url?: string;
+}
+
+async function respond(url: string | undefined, text: string) {
+  if (!url || !/^https:\/\/hooks\.slack\.com\//.test(url)) return;
+  await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ response_type: "ephemeral", replace_original: false, text }), signal: AbortSignal.timeout(5000) }).catch(() => {});
+}
+
+/** Approve / Reject pressed on an approval card: map the Slack user to a member by email and decide. */
+export async function handleSlackInteraction(p: SlackInteraction) {
+  if (p.type !== "block_actions" || !p.team?.id || !p.user?.id) return;
+  const action = p.actions?.find((a) => a.action_id === "approval.approve" || a.action_id === "approval.reject");
+  if (!action?.value) return;
+  const conn = await connectionByExternalId("slack", p.team.id);
+  if (!conn) return respond(p.response_url, "This Slack workspace isn't connected to Anvita any more.");
+  const call = makeCaller("slack", conn.id, conn.credentials);
+  const u = await call<{ ok: boolean; user?: { profile?: { email?: string } } }>(`https://slack.com/api/users.info?user=${encodeURIComponent(p.user.id)}`).catch(() => null);
+  const email = u?.user?.profile?.email;
+  const who = email ? await deciderFor(conn.workspaceId, { email }) : null;
+  if (!who) return respond(p.response_url, "I couldn't match your Slack account to an Anvita member (the email addresses must match).");
+  try {
+    const row = await decideApproval(conn.workspaceId, action.value, who, action.action_id === "approval.approve" ? "approved" : "rejected", { via: "slack" });
+    await respond(p.response_url, `${row.status === "approved" ? "✅ Approved" : "❌ Rejected"}: ${row.title}`);
+  } catch (e) {
+    await respond(p.response_url, (e as Error).message);
+  }
 }

@@ -1,3 +1,4 @@
+import { pushEnabled, subscribePush, unsubscribePush } from "../services/push.js";
 import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
@@ -289,16 +290,30 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
           approvalChannel: z.enum(["slack", "whatsapp", "email"]).optional(),
           digest: z.enum(["daily", "weekly", "off"]).optional(),
           quietHours: z.boolean().optional(),
+          phone: z.string().trim().transform((v) => v.replace(/[\s()+-]/g, "")).pipe(z.string().regex(/^(\d{10,15})?$/, "Use a phone number with country code, e.g. +91 98200 11223")).optional(),
         }),
       },
     },
     async (req) => {
       const a = auth(req);
-      const [u] = await db.update(users).set(req.body).where(eq(users.id, a.userId!)).returning();
+      const body = { ...req.body, ...(req.body.phone !== undefined ? { phone: req.body.phone || null } : {}) };
+      const [u] = await db.update(users).set(body).where(eq(users.id, a.userId!)).returning();
       if (req.body.name) await db.update(memberships).set({ name: req.body.name }).where(eq(memberships.userId, a.userId!));
       return serializeUser(u);
     },
   );
+
+  // ─── Browser push ───
+  app.get("/push/key", { schema: { tags } }, async () => ({ enabled: pushEnabled(), publicKey: config.VAPID_PUBLIC_KEY ?? null }));
+  app.post("/me/push-subscriptions", { preHandler: app.authenticateUser, schema: { tags, body: z.object({ endpoint: z.string().url().max(2000), keys: z.object({ p256dh: z.string().max(200), auth: z.string().max(100) }) }) } }, async (req, reply) => {
+    if (!pushEnabled()) throw badRequest("Browser push isn't configured on this server (VAPID keys)");
+    await subscribePush(auth(req).userId!, req.body, req.headers["user-agent"]);
+    return reply.status(204).send();
+  });
+  app.post("/me/push-subscriptions/remove", { preHandler: app.authenticateUser, schema: { tags, body: z.object({ endpoint: z.string().max(2000) }) } }, async (req, reply) => {
+    await unsubscribePush(req.body.endpoint);
+    return reply.status(204).send();
+  });
 
   app.post("/me/password", { preHandler: app.authenticateUser, schema: { tags, body: z.object({ currentPassword: z.string(), newPassword: password }) } }, async (req, reply) => {
     const a = auth(req);

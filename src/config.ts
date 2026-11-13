@@ -73,6 +73,10 @@ const schema = z.object({
   INVOICE_SAC: z.string().default("998315"),
   /** Signing secret of the Anvita Slack app (Events API). */
   SLACK_SIGNING_SECRET: z.string().optional(),
+  /** Web Push (VAPID). Generate with `npx web-push generate-vapid-keys`. Unset: browser push is off. */
+  VAPID_PUBLIC_KEY: z.string().optional(),
+  VAPID_PRIVATE_KEY: z.string().optional(),
+  VAPID_SUBJECT: z.string().default("mailto:support@anvita.ai"),
   RESEND_API_KEY: z.string().optional(),
 
   /**

@@ -11,6 +11,7 @@ import { notify } from "../services/notifications.js";
 import { approverRole } from "../services/rbac.js";
 import { serializeApproval } from "../services/serializers.js";
 import { emitWebhook } from "../services/webhooks.js";
+import { enqueue } from "../jobs/queue.js";
 import { evaluatePolicies, type Decision } from "./policy.js";
 import { redact, securityPolicy } from "../services/security.js";
 import type { ApprovalPreview, ToolContext, ToolDef, ToolResult } from "./tools/types.js";
@@ -125,6 +126,7 @@ export async function createApproval(
   await publish({ workspaceId: run.workspaceId, threadId: run.threadId, runId: run.id, type: "approval.created", data: serializeApproval(row) });
   await notify({ workspaceId: run.workspaceId, appId: a.appId, title: `${a.title} needs your approval`, meta: `${ctx.actor.name} · just now`, href: "/approvals", minRole: row.approverRole ?? "member" });
   await emitWebhook(run.workspaceId, "approval.requested", serializeApproval(row));
+  await enqueue("approval.alert", { approvalId: row.id }, { maxAttempts: 3 });
   await audit({ workspaceId: run.workspaceId, actor: ctx.actor.name, actorType: ctx.actor.type, action: "approval.requested", target: `${a.action} · ${a.title}`, payload: { approvalId: row.id, runId: run.id } });
   return row;
 }

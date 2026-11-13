@@ -12,6 +12,8 @@ import { applyRetention } from "../services/retention.js";
 import { publish } from "../services/events.js";
 import { serializeApproval } from "../services/serializers.js";
 import { deliverWebhook } from "../services/webhooks.js";
+import { alertApprovers, updateApprovalAlerts } from "../services/approval-alerts.js";
+import { sendPush, type PushJob } from "../services/push.js";
 import { billingCycle } from "../services/subscriptions.js";
 import { cronMatches, startWorkerRun } from "../services/workers.js";
 import { enqueue, registerJob } from "./queue.js";
@@ -23,6 +25,9 @@ export function registerJobHandlers() {
   registerJob("slack.event", (p, { log }) => handleSlackEvent(p as unknown as SlackEventEnvelope, log));
   registerJob("whatsapp.message", (p, { log }) => handleWhatsAppMessage(p as unknown as WaChange, log));
   registerJob("channel.deliver", (p) => deliverRun(String(p.runId)));
+  registerJob("approval.alert", (p) => alertApprovers(String(p.approvalId)));
+  registerJob("approval.alerts.update", (p) => updateApprovalAlerts(String(p.approvalId)));
+  registerJob("push.send", (p) => sendPush(p as unknown as PushJob));
   registerJob("billing.cycle", async () => {
     await billingCycle();
   });
@@ -59,6 +64,7 @@ export async function schedulerTick(log: FastifyBaseLogger, now = new Date()) {
   for (const a of expired) {
     await publish({ workspaceId: a.workspaceId, threadId: a.threadId, runId: a.runId, type: "approval.updated", data: serializeApproval(a) });
     if (a.runId) await enqueue("run.advance", { runId: a.runId });
+    if (a.alerts.some((x) => x.kind === "slack")) await enqueue("approval.alerts.update", { approvalId: a.id });
   }
 
   // Catch-up for chunks that missed embedding (provider outage, pgvector enabled later…).

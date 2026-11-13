@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
-import { approvalRoutes } from "./approvals.js";
+import { approvalLinkRoutes, approvalRoutes } from "./approvals.js";
 import { authRoutes } from "./auth.js";
 import { chatRoutes } from "./chat.js";
 import { governanceRoutes } from "./governance.js";
@@ -19,4 +19,5 @@ export const registerRoutes: FastifyPluginAsync = async (app) => {
   await app.register(channelRoutes);
   await app.register(billingHookRoutes);
   await app.register(enterpriseRoutes);
+  await app.register(approvalLinkRoutes);
 };
