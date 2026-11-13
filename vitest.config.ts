@@ -16,6 +16,7 @@ export default defineConfig({
       STRIPE_SECRET_KEY: "sk_test_1",
       STRIPE_WEBHOOK_SECRET: "whsec_stripe",
       WEB_URL: "http://web.test",
+      VOICE_WAIT_MS: "0",
     },
     // Tests share one database; run files sequentially.
     fileParallelism: false,

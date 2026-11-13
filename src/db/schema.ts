@@ -219,7 +219,7 @@ export const threads = pgTable("threads", {
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   createdBy: text("created_by"),
   title: text("title").notNull(),
-  channel: text("channel").$type<"web" | "slack" | "whatsapp" | "teams">().notNull().default("web"),
+  channel: text("channel").$type<"web" | "slack" | "whatsapp" | "teams" | "widget" | "email" | "voice">().notNull().default("web"),
   channelLabel: text("channel_label"),
   pinned: boolean("pinned").notNull().default(false),
   unread: boolean("unread").notNull().default(false),
@@ -722,3 +722,24 @@ export const pushSubscriptions = pgTable("push_subscriptions", {
   userAgent: text("user_agent"),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("push_subscriptions_endpoint_uq").on(t.endpoint), index("push_subscriptions_user_idx").on(t.userId)]);
+
+/**
+ * Inbound channels a workspace exposes: a website chat widget, an inbound email address, a phone
+ * number (voice provider) or a Microsoft Teams bot. Each routes to a Worker (or Anvita). `key` is
+ * the public id used in widget embeds and webhook URLs; secrets live encrypted in `secretEnc`.
+ */
+export const channelEndpoints = pgTable("channel_endpoints", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  kind: text("kind").$type<"widget" | "email" | "voice" | "teams">().notNull(),
+  name: text("name").notNull(),
+  workerId: text("worker_id"),
+  key: text("key").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  /** Widget: allowedOrigins, greeting, color, title. Email: address, allowedSenders. Voice: provider, number, language, voice. Teams: botAppId, tenantId. */
+  config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+  /** Encrypted JSON: email webhook secret, voice provider auth token, Teams bot password. */
+  secretEnc: text("secret_enc"),
+  createdBy: text("created_by"),
+  createdAt: createdAt(),
+}, (t) => [uniqueIndex("channel_endpoints_key_uq").on(t.key), index("channel_endpoints_ws_idx").on(t.workspaceId)]);

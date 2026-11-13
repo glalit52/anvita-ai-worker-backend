@@ -5,7 +5,9 @@ import { parseCredentials } from "../connectors/index.js";
 import type { ChatBlock } from "../contracts/web.js";
 import { db, type Tx } from "../db/client.js";
 import { approvals, connections, messages, runs, threads } from "../db/schema.js";
-import { toSlack, toWhatsApp } from "./common.js";
+import { postAssistantText, toSlack, toWhatsApp } from "./common.js";
+import { sendEmailReply } from "./email.js";
+import { sendTeams } from "./teams.js";
 import { postToSlack } from "./slack.js";
 import { sendWhatsApp } from "./whatsapp.js";
 
@@ -26,8 +28,19 @@ export async function sendToChannel(workspaceId: string, threadRef: string, mark
     await sendWhatsApp(await liveConnection(workspaceId, "whatsapp"), threadRef.split(":")[2], toWhatsApp(markdown));
     return true;
   }
+  if (threadRef.startsWith("teams:")) return sendTeams(threadRef, markdown);
+  const [t] = await db.select({ id: threads.id, title: threads.title }).from(threads).where(and(eq(threads.workspaceId, workspaceId), eq(threads.externalRef, threadRef)));
+  if (threadRef.startsWith("email:")) return sendEmailReply(threadRef, t?.title ?? "Your message", markdown);
+  // Widget and voice read the thread itself: a teammate's reply becomes a message in it.
+  if ((threadRef.startsWith("widget:") || threadRef.startsWith("voice:")) && t) {
+    await postAssistantText(workspaceId, t.id, "Support team", markdown);
+    return true;
+  }
   return false;
 }
+
+/** Channels that read answers straight from the thread don't need run delivery. */
+const pulls = (ref: string) => ref.startsWith("widget:") || ref.startsWith("voice:");
 
 /**
  * After a channel-originated run finishes or pauses, post what's new in the assistant message
@@ -46,7 +59,7 @@ async function deliverLocked(runId: string, db: Tx) {
   const [run] = await db.select().from(runs).where(eq(runs.id, runId));
   if (!run?.threadId || !run.assistantMessageId) return;
   const [thread] = await db.select().from(threads).where(eq(threads.id, run.threadId));
-  if (!thread?.externalRef) return;
+  if (!thread?.externalRef || pulls(thread.externalRef)) return;
   const [msg] = await db.select().from(messages).where(eq(messages.id, run.assistantMessageId));
   const blocks = (msg?.blocks ?? []) as ChatBlock[];
   const delivered = run.deliveredBlocks;

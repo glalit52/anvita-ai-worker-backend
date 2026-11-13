@@ -1,6 +1,6 @@
 import { config } from "../config.js";
 
-export interface Email { to: string; subject: string; text: string; html?: string }
+export interface Email { to: string; subject: string; text: string; html?: string; from?: string; replyTo?: string; headers?: Record<string, string> }
 
 /** Transactional email via Resend when configured; otherwise logged (dev). Returns whether it was sent. */
 export async function sendEmail(msg: Email, log?: { info: (o: object, m: string) => void }): Promise<boolean> {
@@ -11,7 +11,7 @@ export async function sendEmail(msg: Email, log?: { info: (o: object, m: string)
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${config.RESEND_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: config.EMAIL_FROM, to: [msg.to], subject: msg.subject, text: msg.text, html: msg.html }),
+    body: JSON.stringify({ from: msg.from ?? config.EMAIL_FROM, to: [msg.to], subject: msg.subject, text: msg.text, html: msg.html, ...(msg.replyTo ? { reply_to: msg.replyTo } : {}), ...(msg.headers ? { headers: msg.headers } : {}) }),
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Resend error ${res.status}: ${await res.text()}`);

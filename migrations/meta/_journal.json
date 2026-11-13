@@ -99,6 +99,13 @@
       "when": 1794591776692,
       "tag": "0013_approval_alerts",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794592154318,
+      "tag": "0014_channel_endpoints",
+      "breakpoints": true
     }
   ]
 }

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import multipart from "@fastify/multipart";
@@ -35,12 +36,16 @@ export async function buildApp(opts: { logger?: boolean | object } = {}): Promis
   app.setSerializerCompiler(serializerCompiler);
 
   await app.register(helmet, { contentSecurityPolicy: false });
-  await app.register(cors, {
-    origin: config.CORS_ORIGINS.split(",").map((s) => s.trim()),
-    credentials: true,
+  const corsBase = {
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Authorization", "Content-Type", "X-Workspace-Id", "X-Request-Id", "Last-Event-ID", "Idempotency-Key"],
     exposedHeaders: ["X-Request-Id"],
+  };
+  const appOrigins = config.CORS_ORIGINS.split(",").map((s) => s.trim());
+  // The embeddable chat widget runs on customers' websites: its public endpoints accept any
+  // origin (each widget checks its own allowed origins) and never use cookies.
+  await app.register(cors, {
+    delegator: (req, cb) => cb(null, req.url.startsWith("/v1/public/") || req.url.startsWith("/widget.js") ? { ...corsBase, origin: true, credentials: false } : { ...corsBase, origin: appOrigins, credentials: true }),
   });
   await app.register(rateLimit, {
     max: config.RATE_LIMIT_PER_MINUTE,
@@ -127,5 +132,9 @@ export async function buildApp(opts: { logger?: boolean | object } = {}): Promis
     } as typeof handler;
   });
   await app.register(registerRoutes, { prefix: "/v1" });
+
+  // Embeddable website chat widget (see channels/widget.ts).
+  const widgetJs = readFileSync(new URL("./channels/assets/widget.js", import.meta.url), "utf8");
+  app.get("/widget.js", { schema: { hide: true } }, async (_req, reply) => reply.type("application/javascript; charset=utf-8").header("Cache-Control", "public, max-age=300").header("Cross-Origin-Resource-Policy", "cross-origin").send(widgetJs));
   return app;
 }

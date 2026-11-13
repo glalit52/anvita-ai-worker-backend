@@ -77,6 +77,10 @@ const schema = z.object({
   VAPID_PUBLIC_KEY: z.string().optional(),
   VAPID_PRIVATE_KEY: z.string().optional(),
   VAPID_SUBJECT: z.string().default("mailto:support@anvita.ai"),
+  /** How long a voice turn waits for the Worker before telling the caller "one moment". */
+  VOICE_WAIT_MS: z.coerce.number().int().min(0).default(7000),
+  /** Bot Framework token signing keys (Teams). Override only for testing. */
+  TEAMS_JWKS_URL: z.string().url().default("https://login.botframework.com/v1/.well-known/keys"),
   RESEND_API_KEY: z.string().optional(),
 
   /**

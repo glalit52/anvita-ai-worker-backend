@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/main.ts",
-    "build": "tsc -p tsconfig.build.json && mkdir -p dist/sandbox/runtime && cp src/sandbox/runtime/runner.py src/sandbox/runtime/runner.mjs dist/sandbox/runtime/",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/sandbox/runtime && cp src/sandbox/runtime/runner.py src/sandbox/runtime/runner.mjs dist/sandbox/runtime/ && mkdir -p dist/channels/assets && cp src/channels/assets/widget.js dist/channels/assets/",
     "start": "node dist/main.js",
     "start:api": "ROLE=api node dist/main.js",
     "start:worker": "ROLE=worker node dist/main.js",
