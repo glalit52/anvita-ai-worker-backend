@@ -12,6 +12,7 @@ import { approverRole } from "../services/rbac.js";
 import { serializeApproval } from "../services/serializers.js";
 import { emitWebhook } from "../services/webhooks.js";
 import { evaluatePolicies, type Decision } from "./policy.js";
+import { redact, securityPolicy } from "../services/security.js";
 import type { ApprovalPreview, ToolContext, ToolDef, ToolResult } from "./tools/types.js";
 
 /**
@@ -129,6 +130,8 @@ export async function createApproval(
 }
 
 export async function recordStep(run: Run, seq: number, s: { kind: string; name: string; label: string; appId?: string | null; status: string; input?: unknown; output?: unknown; model?: string; tokens?: unknown; credits?: number; startedAt?: Date }) {
+  // Workspaces with PII redaction on keep masked step logs (the tool itself still saw real data).
+  if ((await securityPolicy(run.workspaceId)).piiRedaction) s = { ...s, input: redact(s.input), output: redact(s.output) };
   await db.insert(runSteps).values({ id: newId("stp"), runId: run.id, workspaceId: run.workspaceId, seq, kind: s.kind, name: s.name, label: s.label, appId: s.appId ?? null, status: s.status, input: (s.input ?? null) as object, output: (s.output ?? null) as object, model: s.model ?? null, tokens: (s.tokens ?? null) as object, credits: s.credits ?? 0, startedAt: s.startedAt ?? new Date(), endedAt: new Date() });
 }
 

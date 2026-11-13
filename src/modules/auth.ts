@@ -1,4 +1,4 @@
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { config } from "../config.js";
@@ -8,7 +8,11 @@ import { hashPassword, sha256, verifyPassword } from "../lib/crypto.js";
 import { AppError, badRequest, conflict, forbidden, unauthorized } from "../lib/errors.js";
 import { samlLoginUrl, ssoForEmail } from "../services/saml.js";
 import { newId, randomString } from "../lib/ids.js";
-import { auth, signAccessToken } from "../plugins/auth.js";
+import { auth } from "../plugins/auth.js";
+import { SignJWT, jwtVerify } from "jose";
+import { decrypt, encrypt } from "../lib/crypto.js";
+import { isConsumerDomain, newRecoveryCodes, newTotpSecret, otpauthUrl, policyFrom, securityPolicy, verifyTotp } from "../services/security.js";
+import { issueTokens, listSessions, revokeAllSessions, revokeSession, type Amr } from "../services/sessions.js";
 import { audit } from "../services/audit.js";
 import { serializeUser } from "../services/serializers.js";
 import { createWorkspace } from "../services/workspace.js";
@@ -17,10 +21,38 @@ import { ssoFinish, ssoProviders, ssoStartUrl } from "../services/sso.js";
 const email = z.string().trim().toLowerCase().email().max(254);
 const password = z.string().min(10, "Use at least 10 characters").max(200);
 
-export async function issueTokens(userId: string, userAgent?: string) {
-  const refresh = `rt_${randomString(48)}`;
-  await db.insert(refreshTokens).values({ id: newId("rtk"), userId, tokenHash: sha256(refresh), userAgent: userAgent?.slice(0, 200) ?? null, expiresAt: new Date(Date.now() + config.REFRESH_TOKEN_TTL_DAYS * 86400_000) });
-  return { accessToken: await signAccessToken(userId), refreshToken: refresh, expiresIn: config.ACCESS_TOKEN_TTL_SECONDS, tokenType: "Bearer" };
+export { issueTokens };
+
+const mfaSecret = new TextEncoder().encode(`${config.JWT_SECRET}:mfa`);
+
+/** Short-lived proof that the password was right, exchanged for tokens with a TOTP or recovery code. */
+async function mfaChallenge(userId: string) {
+  return new SignJWT({ typ: "mfa" }).setProtectedHeader({ alg: "HS256" }).setSubject(userId).setIssuedAt().setExpirationTime("5m").sign(mfaSecret);
+}
+
+/** A TOTP code, or a one-time recovery code (consumed). */
+async function checkSecondFactor(u: typeof users.$inferSelect, code: string): Promise<boolean> {
+  if (u.totpSecretEnc && verifyTotp(decrypt(u.totpSecretEnc), code)) return true;
+  const h = sha256(code.trim().toLowerCase());
+  if (u.recoveryCodes.includes(h)) {
+    await db.update(users).set({ recoveryCodes: u.recoveryCodes.filter((x) => x !== h) }).where(eq(users.id, u.id));
+    return true;
+  }
+  return false;
+}
+
+/** Domain capture: a workspace that turned it on and owns this email domain. */
+async function capturingWorkspace(emailAddr: string) {
+  const domain = emailAddr.split("@")[1]?.toLowerCase();
+  if (!domain || isConsumerDomain(domain)) return null;
+  const rows = await db.select({ id: workspaces.id, settings: workspaces.settings }).from(workspaces).where(sql`${domain} = any(${workspaces.domains})`);
+  for (const w of rows) {
+    if (!policyFrom(w.settings as Record<string, unknown>).domainCapture) continue;
+    // The domain must belong to one of the workspace's owners or admins.
+    const [admin] = await db.select({ id: memberships.id }).from(memberships).where(and(eq(memberships.workspaceId, w.id), eq(memberships.status, "active"), inArray(memberships.role, ["owner", "admin"]), sql`lower(${memberships.email}) like ${"%@" + domain}`)).limit(1);
+    if (admin) return w.id;
+  }
+  return null;
 }
 
 async function meFor(userId: string) {
@@ -44,11 +76,17 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     if (existing) throw conflict("An account with this email already exists");
     const userId = newId("usr");
     const passwordHash = await hashPassword(pw);
+    const captured = await capturingWorkspace(em);
     const workspaceId = await db.transaction(async (tx) => {
       await tx.insert(users).values({ id: userId, email: em, name, passwordHash, lastActiveAt: new Date() });
+      if (captured) {
+        await tx.insert(memberships).values({ id: newId("mem"), workspaceId: captured, userId, email: em, name, role: "member", status: "active", lastActiveAt: new Date() });
+        return captured;
+      }
       return createWorkspace(tx, { name: workspaceName, owner: { userId, name, email: em } });
     });
-    return reply.status(201).send({ ...(await issueTokens(userId, req.headers["user-agent"])), ...(await meFor(userId)), workspaceId });
+    if (captured) await audit({ workspaceId: captured, actor: name, actorId: userId, action: "member.joined", target: `${em} (domain capture)`, ip: req.ip });
+    return reply.status(201).send({ ...(await issueTokens(userId, req.headers["user-agent"], { ip: req.ip })), ...(await meFor(userId)), workspaceId, joinedExisting: !!captured });
   });
 
   app.post("/auth/login", { ...loginLimit, schema: { tags, security: [], body: z.object({ email, password: z.string().min(1) }) } }, async (req) => {
@@ -57,8 +95,25 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     // Organisations that enforce SAML don't allow password sign-in for their domains.
     const sso = await ssoForEmail(req.body.email);
     if (sso?.enforced) throw new AppError(403, "sso_required", "Your organisation requires single sign-on", { loginUrl: samlLoginUrl(sso.workspaceId) });
+    if (u.mfaEnabled) return { mfaRequired: true, mfaToken: await mfaChallenge(u.id) };
     await db.update(users).set({ lastActiveAt: new Date() }).where(eq(users.id, u.id));
-    return { ...(await issueTokens(u.id, req.headers["user-agent"])), ...(await meFor(u.id)) };
+    return { ...(await issueTokens(u.id, req.headers["user-agent"], { ip: req.ip })), ...(await meFor(u.id)) };
+  });
+
+  /** Second step of sign-in for people with two-step verification on. */
+  app.post("/auth/mfa", { ...loginLimit, schema: { tags, security: [], body: z.object({ mfaToken: z.string(), code: z.string().trim().min(6).max(20) }) } }, async (req) => {
+    let userId: string;
+    try {
+      const { payload } = await jwtVerify(req.body.mfaToken, mfaSecret, { algorithms: ["HS256"] });
+      if (payload.typ !== "mfa" || !payload.sub) throw new Error();
+      userId = payload.sub;
+    } catch {
+      throw unauthorized("Sign-in took too long — enter your password again");
+    }
+    const [u] = await db.select().from(users).where(eq(users.id, userId));
+    if (!u?.mfaEnabled || !(await checkSecondFactor(u, req.body.code))) throw unauthorized("That code isn't right");
+    await db.update(users).set({ lastActiveAt: new Date() }).where(eq(users.id, u.id));
+    return { ...(await issueTokens(u.id, req.headers["user-agent"], { ip: req.ip, amr: "pwd+otp" })), ...(await meFor(u.id)) };
   });
 
   /** Rotating refresh tokens: each use revokes the old token and issues a new pair. */
@@ -73,7 +128,8 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     }
     if (rt.expiresAt < new Date()) throw unauthorized("Session expired; please sign in again");
     await db.update(refreshTokens).set({ revokedAt: new Date() }).where(eq(refreshTokens.id, rt.id));
-    return issueTokens(rt.userId, req.headers["user-agent"]);
+    // Same session: keeps its id, original sign-in time and method.
+    return issueTokens(rt.userId, req.headers["user-agent"], { ip: req.ip, sessionId: rt.sessionId ?? undefined, authTime: rt.authTime ?? rt.createdAt, amr: rt.amr as Amr });
   });
 
   app.post("/auth/logout", { schema: { tags, security: [], body: z.object({ refreshToken: z.string() }) } }, async (req, reply) => {
@@ -153,14 +209,70 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
       workspaceId = await db.transaction((tx) => createWorkspace(tx, { name: consumer ? `${id.name.split(" ")[0]}'s workspace` : domain.split(".")[0].replace(/^./, (c) => c.toUpperCase()), owner: { userId: u.id, name: u.name, email: u.email } }));
     } else workspaceId = m.workspaceId;
     await db.update(users).set({ lastActiveAt: new Date() }).where(eq(users.id, u.id));
-    const t = await issueTokens(u.id, req.headers["user-agent"]);
+    const t = await issueTokens(u.id, req.headers["user-agent"], { ip: req.ip, amr: "sso" });
     const frag = new URLSearchParams({ access_token: t.accessToken, refresh_token: t.refreshToken, workspace_id: workspaceId ?? "", redirect: m ? id.redirect : "/onboarding" });
     return reply.redirect(`${config.WEB_URL}/auth/callback#${frag}`);
   });
 
   app.get("/me", { preHandler: app.authenticateUser, schema: { tags } }, async (req) => {
     const a = auth(req);
-    return { ...(await meFor(a.userId!)), currentWorkspaceId: a.workspaceId || null, role: a.workspaceId ? a.role : null };
+    const [u] = await db.select({ mfaEnabled: users.mfaEnabled, hasPassword: users.passwordHash }).from(users).where(eq(users.id, a.userId!));
+    const policy = a.workspaceId ? await securityPolicy(a.workspaceId) : null;
+    return { ...(await meFor(a.userId!)), currentWorkspaceId: a.workspaceId || null, role: a.workspaceId ? a.role : null, security: { mfaEnabled: !!u?.mfaEnabled, hasPassword: !!u?.hasPassword, sessionMethod: a.amr ?? null, mfaRequired: !!policy?.mfa && (a.amr ?? "pwd") === "pwd", ip: req.ip } };
+  });
+
+  // ─── Two-step verification ───
+
+  app.post("/me/mfa/setup", { preHandler: app.authenticateUser, schema: { tags } }, async (req) => {
+    const a = auth(req);
+    const secret = newTotpSecret();
+    await db.update(users).set({ totpPendingEnc: encrypt(secret) }).where(eq(users.id, a.userId!));
+    return { secret, otpauthUrl: otpauthUrl(secret, a.email ?? a.userName) };
+  });
+
+  /** Confirm the authenticator works; returns recovery codes (shown once) and upgrades this session. */
+  app.post("/me/mfa/enable", { preHandler: app.authenticateUser, schema: { tags, body: z.object({ code: z.string().trim() }) } }, async (req) => {
+    const a = auth(req);
+    const [u] = await db.select().from(users).where(eq(users.id, a.userId!));
+    if (!u.totpPendingEnc) throw badRequest("Start the setup again");
+    const secret = decrypt(u.totpPendingEnc);
+    if (!verifyTotp(secret, req.body.code)) throw badRequest("That code isn't right — check your phone's clock and try again");
+    const codes = newRecoveryCodes();
+    await db.update(users).set({ mfaEnabled: true, totpSecretEnc: encrypt(secret), totpPendingEnc: null, recoveryCodes: codes.map((c) => sha256(c)) }).where(eq(users.id, u.id));
+    if (a.workspaceId) await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "mfa.enabled", target: u.email, ip: req.ip });
+    const tokens = a.sessionId ? await issueTokens(u.id, req.headers["user-agent"], { ip: req.ip, sessionId: a.sessionId, authTime: a.authTime, amr: a.amr === "sso" ? "sso" : "pwd+otp" }) : null;
+    return { recoveryCodes: codes, ...(tokens ?? {}) };
+  });
+
+  app.post("/me/mfa/disable", { preHandler: app.authenticateUser, schema: { tags, body: z.object({ code: z.string().trim() }) } }, async (req, reply) => {
+    const a = auth(req);
+    const [u] = await db.select().from(users).where(eq(users.id, a.userId!));
+    if (!u.mfaEnabled) return reply.status(204).send();
+    if (!(await checkSecondFactor(u, req.body.code))) throw badRequest("That code isn't right");
+    await db.update(users).set({ mfaEnabled: false, totpSecretEnc: null, recoveryCodes: [] }).where(eq(users.id, u.id));
+    if (a.workspaceId) await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "mfa.disabled", target: u.email, ip: req.ip });
+    return reply.status(204).send();
+  });
+
+  // ─── Sessions ───
+
+  app.get("/me/sessions", { preHandler: app.authenticateUser, schema: { tags } }, async (req) => {
+    const a = auth(req);
+    return { data: (await listSessions(a.userId!)).map((s) => ({ ...s, current: s.id === a.sessionId })) };
+  });
+
+  app.delete("/me/sessions/:id", { preHandler: app.authenticateUser, schema: { tags, params: z.object({ id: z.string() }) } }, async (req, reply) => {
+    const a = auth(req);
+    if (!(await revokeSession(a.userId!, req.params.id))) throw badRequest("Session not found");
+    return reply.status(204).send();
+  });
+
+  /** Sign out everywhere else. */
+  app.post("/me/sessions/revoke-others", { preHandler: app.authenticateUser, schema: { tags } }, async (req) => {
+    const a = auth(req);
+    let n = 0;
+    for (const s of await listSessions(a.userId!)) if (s.id !== a.sessionId) n += await revokeSession(a.userId!, s.id);
+    return { revoked: n };
   });
 
   app.patch(
@@ -193,7 +305,7 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     const [u] = await db.select().from(users).where(eq(users.id, a.userId!));
     if (!(await verifyPassword(req.body.currentPassword, u.passwordHash))) throw unauthorized("Current password is incorrect");
     await db.update(users).set({ passwordHash: await hashPassword(req.body.newPassword) }).where(eq(users.id, u.id));
-    await db.update(refreshTokens).set({ revokedAt: new Date() }).where(and(eq(refreshTokens.userId, u.id), isNull(refreshTokens.revokedAt)));
+    await revokeAllSessions(u.id);
     return reply.status(204).send();
   });
 

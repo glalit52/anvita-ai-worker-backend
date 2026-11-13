@@ -6,7 +6,9 @@ import { config } from "../config.js";
 import { db } from "../db/client.js";
 import { apiKeys, memberships, users, type Role } from "../db/schema.js";
 import { sha256 } from "../lib/crypto.js";
-import { forbidden, unauthorized } from "../lib/errors.js";
+import { AppError, forbidden, unauthorized } from "../lib/errors.js";
+import { ipAllowed, securityPolicy } from "../services/security.js";
+import { sessionActive } from "../services/sessions.js";
 import { can, type Permission } from "../services/rbac.js";
 
 export interface AuthContext {
@@ -18,6 +20,10 @@ export interface AuthContext {
   /** Set when authenticated with an API key. */
   apiKeyId?: string;
   scopes?: string[];
+  /** Sign-in session (user tokens): id, original sign-in time and method. */
+  sessionId?: string;
+  authTime?: Date;
+  amr?: string;
 }
 
 declare module "fastify" {
@@ -40,8 +46,8 @@ declare module "fastify" {
 
 const secret = new TextEncoder().encode(config.JWT_SECRET);
 
-export async function signAccessToken(userId: string): Promise<string> {
-  return new SignJWT({ typ: "access" })
+export async function signAccessToken(userId: string, session: { sid?: string; authTime?: Date; amr?: string } = {}): Promise<string> {
+  return new SignJWT({ typ: "access", ...(session.sid ? { sid: session.sid } : {}), ...(session.authTime ? { auth_time: Math.floor(session.authTime.getTime() / 1000) } : {}), ...(session.amr ? { amr: session.amr } : {}) })
     .setProtectedHeader({ alg: "HS256" })
     .setSubject(userId)
     .setIssuer("anvita")
@@ -50,11 +56,11 @@ export async function signAccessToken(userId: string): Promise<string> {
     .sign(secret);
 }
 
-async function verifyAccessToken(token: string): Promise<string> {
+async function verifyAccessToken(token: string): Promise<{ sub: string; sid?: string; authTime?: Date; amr?: string }> {
   try {
     const { payload } = await jwtVerify(token, secret, { issuer: "anvita", algorithms: ["HS256"] });
     if (payload.typ !== "access" || !payload.sub) throw new Error("bad token");
-    return payload.sub;
+    return { sub: payload.sub, sid: typeof payload.sid === "string" ? payload.sid : undefined, authTime: typeof payload.auth_time === "number" ? new Date(payload.auth_time * 1000) : undefined, amr: typeof payload.amr === "string" ? payload.amr : undefined };
   } catch {
     throw unauthorized("Invalid or expired access token");
   }
@@ -83,7 +89,11 @@ async function resolve(req: FastifyRequest, requireWorkspace: boolean): Promise<
     return { userId: null, userName: `API key · ${key.name}`, email: null, workspaceId: key.workspaceId, role: KEY_ROLE, apiKeyId: key.id, scopes: key.scope.split(",").map((s) => s.trim()) };
   }
 
-  const userId = await verifyAccessToken(token);
+  const claims = await verifyAccessToken(token);
+  const userId = claims.sub;
+  // Signed-out or revoked sessions stop working immediately, not when the access token expires.
+  if (claims.sid && !(await sessionActive(claims.sid))) throw new AppError(401, "session_revoked", "This session was signed out");
+  const session = { sessionId: claims.sid, authTime: claims.authTime, amr: claims.amr };
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!user) throw unauthorized("User no longer exists");
 
@@ -95,14 +105,24 @@ async function resolve(req: FastifyRequest, requireWorkspace: boolean): Promise<
   if (!m) {
     if (typeof wanted === "string" && wanted) throw forbidden("You are not a member of this workspace");
     if (requireWorkspace) throw forbidden("You don't belong to a workspace yet");
-    return { userId, userName: user.name, email: user.email, workspaceId: "", role: "viewer" };
+    return { userId, userName: user.name, email: user.email, workspaceId: "", role: "viewer", ...session };
   }
   const now = new Date();
   if (!m.lastActiveAt || now.getTime() - m.lastActiveAt.getTime() > 60_000) {
     void db.update(memberships).set({ lastActiveAt: now }).where(eq(memberships.id, m.id)).catch(() => {});
     void db.update(users).set({ lastActiveAt: now }).where(eq(users.id, userId)).catch(() => {});
   }
-  return { userId, userName: user.name, email: user.email, workspaceId: m.workspaceId, role: m.role };
+  return { userId, userName: user.name, email: user.email, workspaceId: m.workspaceId, role: m.role, ...session };
+}
+
+/** Workspace security policies: IP allowlist, maximum session age, two-step verification. */
+async function enforcePolicy(req: FastifyRequest, ctx: AuthContext) {
+  if (!ctx.workspaceId) return;
+  const p = await securityPolicy(ctx.workspaceId);
+  if (p.ipAllowlist && !ipAllowed(req.ip, p.ipAllowlist)) throw new AppError(403, "ip_not_allowed", `Access from ${req.ip} isn't allowed by this workspace's IP allowlist`);
+  if (ctx.apiKeyId) return;
+  if (p.sessionHours && ctx.authTime && Date.now() - ctx.authTime.getTime() > p.sessionHours * 3600_000) throw new AppError(401, "session_expired", "Your session has expired — please sign in again");
+  if (p.mfa && (ctx.amr ?? "pwd") === "pwd") throw new AppError(403, "mfa_required", "This workspace requires two-step verification. Set it up in your profile to continue.");
 }
 
 /** API keys may only touch what their scope names. Scope strings: "all", "chat", "workers:run", "kb:read", "approvals". */
@@ -128,6 +148,7 @@ export default fp(async (app: FastifyInstance) => {
     if (ctx.apiKeyId ? !keyAllows(ctx.scopes ?? [], perm) : perm && !can(ctx.role, perm)) {
       throw forbidden(perm ? `Requires permission ${perm}` : undefined);
     }
+    await enforcePolicy(req, ctx);
     req.auth = ctx;
     req.tenantScoped = true;
   });

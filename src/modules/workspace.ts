@@ -3,12 +3,14 @@ import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { config } from "../config.js";
 import { db } from "../db/client.js";
-import { memberships, workspaces } from "../db/schema.js";
+import { memberships, users, workspaces } from "../db/schema.js";
 import { sha256 } from "../lib/crypto.js";
 import { assertFound, badRequest, conflict, forbidden } from "../lib/errors.js";
 import { newId, randomString } from "../lib/ids.js";
 import { auth } from "../plugins/auth.js";
 import { audit } from "../services/audit.js";
+import { forgetPolicy, ipAllowed, policyFrom, validRange } from "../services/security.js";
+import { revokeAllSessions } from "../services/sessions.js";
 import { getBalance } from "../services/credits.js";
 import { sendEmail } from "../services/email.js";
 import { roleAtLeast } from "../services/rbac.js";
@@ -41,7 +43,28 @@ export const workspaceRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.patch("/workspace/settings", { preHandler: app.authorize("workspace:manage"), schema: { tags, body: z.record(z.string().max(100), z.union([z.string().max(2000), z.number(), z.boolean()])) } }, async (req) => {
     const a = auth(req);
+    const b = req.body;
+    // Security settings are enforced by the API, so check them before saving.
+    if (b["security.ipRanges"] !== undefined || b["security.ipAllowlist"] === true) {
+      const [cur] = await db.select({ settings: workspaces.settings }).from(workspaces).where(eq(workspaces.id, a.workspaceId));
+      const merged = policyFrom({ ...(cur?.settings ?? {}), ...b });
+      const raw = String(b["security.ipRanges"] ?? (cur?.settings as Record<string, unknown>)?.["security.ipRanges"] ?? "").split(/[\s,;]+/).filter(Boolean);
+      const bad = raw.filter((r) => !validRange(r));
+      if (bad.length) throw badRequest(`Not an IP address or CIDR range: ${bad.join(", ")}`);
+      if (b["security.ipAllowlist"] === true && !raw.length) throw badRequest("Add at least one IP range before turning on the allowlist");
+      if (merged.ipAllowlist && !ipAllowed(req.ip, merged.ipAllowlist)) throw badRequest(`Your current IP (${req.ip}) isn't in the list — add it so you don't lock yourself out`);
+    }
+    for (const k of ["security.sessionHours", "security.retentionDays"]) {
+      if (b[k] === undefined) continue;
+      const n = Number(b[k]);
+      if (!(Number.isFinite(n) && n >= 0 && n <= (k === "security.sessionHours" ? 24 * 90 : 3650))) throw badRequest(`${k} must be a number of ${k.endsWith("Hours") ? "hours (0–2160)" : "days (0–3650)"}`);
+    }
+    if (b["security.mfa"] === true) {
+      const [me] = await db.select({ mfa: users.mfaEnabled }).from(users).where(eq(users.id, a.userId ?? ""));
+      if (!me?.mfa && a.amr !== "sso") throw badRequest("Turn on two-step verification for your own account first (Profile → Two-step verification)");
+    }
     const [ws] = await db.update(workspaces).set({ settings: sql`${workspaces.settings} || ${JSON.stringify(req.body)}::jsonb` }).where(eq(workspaces.id, a.workspaceId)).returning({ settings: workspaces.settings });
+    forgetPolicy(a.workspaceId);
     await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "settings.updated", target: Object.keys(req.body).join(", "), ip: req.ip });
     return ws.settings;
   });
@@ -94,6 +117,17 @@ export const workspaceRoutes: FastifyPluginAsyncZod = async (app) => {
     await db.delete(memberships).where(eq(memberships.id, m.id));
     await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "member.removed", target: m.email, ip: req.ip });
     return reply.status(204).send();
+  });
+
+  /** Sign a member out of every device (e.g. a lost laptop). */
+  app.post("/members/:id/sign-out", { preHandler: app.authorize("members:manage"), schema: { tags, params: z.object({ id: z.string() }) } }, async (req) => {
+    const a = auth(req);
+    const m = assertFound((await db.select().from(memberships).where(and(eq(memberships.id, req.params.id), eq(memberships.workspaceId, a.workspaceId))))[0], "Member");
+    if (!m.userId) throw badRequest("This person hasn't joined yet");
+    if (!roleAtLeast(a.role, m.role)) throw forbidden("You can't sign out someone with a higher role");
+    const revoked = await revokeAllSessions(m.userId);
+    await audit({ workspaceId: a.workspaceId, actor: a.userName, actorId: a.userId, action: "member.signed_out", target: m.email, ip: req.ip });
+    return { revoked };
   });
 };
 

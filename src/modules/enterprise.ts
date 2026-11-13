@@ -45,7 +45,7 @@ async function completeSamlLogin(cfg: SsoConfig, id: { email: string; name: stri
   else await db.update(memberships).set({ userId: u.id, status: "active", sso: true, inviteTokenHash: null, lastActiveAt: new Date() }).where(eq(memberships.id, m.id));
   await db.update(users).set({ lastActiveAt: new Date() }).where(eq(users.id, u.id));
   await audit({ workspaceId: cfg.workspaceId, actor: id.name, actorId: u.id, action: "auth.saml_login", target: id.email, payload: { jit: !m } });
-  return issueTokens(u.id, userAgent);
+  return issueTokens(u.id, userAgent, { amr: "sso" });
 }
 
 export const enterpriseRoutes: FastifyPluginAsyncZod = async (app) => {

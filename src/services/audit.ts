@@ -28,7 +28,10 @@ function digest(prevHash: string | null, e: { workspaceId: string; actor: string
 }
 
 /** Append to the workspace's hash-chained audit log. Serialized per workspace with an advisory lock. */
+import { redact, redactText, securityPolicy } from "./security.js";
+
 export async function audit(input: AuditInput, tx?: Tx): Promise<void> {
+  if ((await securityPolicy(input.workspaceId)).piiRedaction) input = { ...input, target: redactText(input.target), payload: redact(input.payload) };
   const write = async (t: Tx) => {
     await t.execute(sql`select pg_advisory_xact_lock(hashtext(${"audit:" + input.workspaceId}))`);
     const [prev] = await t.select({ hash: auditEvents.hash }).from(auditEvents).where(eq(auditEvents.workspaceId, input.workspaceId)).orderBy(desc(auditEvents.id)).limit(1);

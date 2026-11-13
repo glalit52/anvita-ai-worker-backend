@@ -39,6 +39,11 @@ export const users = pgTable("users", {
   approvalChannel: text("approval_channel").notNull().default("email"),
   digest: text("digest").notNull().default("daily"),
   quietHours: boolean("quiet_hours").notNull().default(false),
+  /** Two-step verification (TOTP, RFC 6238). Secrets are AES-GCM encrypted; recovery codes stored as SHA-256. */
+  mfaEnabled: boolean("mfa_enabled").notNull().default(false),
+  totpSecretEnc: text("totp_secret_enc"),
+  totpPendingEnc: text("totp_pending_enc"),
+  recoveryCodes: text("recovery_codes").array().notNull().default(sql`'{}'::text[]`),
   lastActiveAt: ts("last_active_at"),
   createdAt: createdAt(),
 }, (t) => [uniqueIndex("users_email_uq").on(sql`lower(${t.email})`)]);
@@ -112,8 +117,14 @@ export const refreshTokens = pgTable("refresh_tokens", {
   expiresAt: ts("expires_at").notNull(),
   revokedAt: ts("revoked_at"),
   userAgent: text("user_agent"),
+  /** One sign-in = one session; rotated refresh tokens keep the session id, sign-in time and method. */
+  sessionId: text("session_id"),
+  authTime: ts("auth_time"),
+  /** How the session was authenticated: pwd, pwd+otp, sso. */
+  amr: text("amr").notNull().default("pwd"),
+  ip: text("ip"),
   createdAt: createdAt(),
-}, (t) => [uniqueIndex("refresh_tokens_hash_uq").on(t.tokenHash)]);
+}, (t) => [uniqueIndex("refresh_tokens_hash_uq").on(t.tokenHash), index("refresh_tokens_session_idx").on(t.sessionId)]);
 
 export const apiKeys = pgTable("api_keys", {
   id: text("id").primaryKey(),
