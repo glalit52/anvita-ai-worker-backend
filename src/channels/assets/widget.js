@@ -12,7 +12,7 @@
   var cursor = null, seen = {}, timer = null, open = false, cfg = null;
 
   function req(method, path, body) {
-    var h = { "Content-Type": "application/json" };
+    var h = body ? { "Content-Type": "application/json" } : {};
     if (session) h.Authorization = "Bearer " + session.token;
     return fetch(API + path, { method: method, headers: h, body: body ? JSON.stringify(body) : undefined }).then(function (r) {
       if (r.status === 401 && session && path !== "/session") { session = null; try { localStorage.removeItem(store); } catch (e) {} }

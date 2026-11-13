@@ -37,11 +37,11 @@ export function originAllowed(e: Endpoint, origin: string | undefined) {
   if (!origin) return false;
   let host: string;
   try {
-    host = new URL(origin).host;
+    host = new URL(origin).hostname;
   } catch {
     return false;
   }
-  return allowed.some((a) => (a.includes("://") ? a.replace(/\/$/, "") === origin : host === a || host.endsWith(`.${a}`)));
+  return allowed.some((a) => (a.includes("://") ? a.replace(/\/$/, "") === origin : host === a.toLowerCase() || host.endsWith(`.${a.toLowerCase()}`)));
 }
 
 export const widgetRef = (e: Endpoint, visitorId: string) => `widget:${e.id}:${visitorId}`;
