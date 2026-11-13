@@ -102,6 +102,12 @@ const schema = z.object({
   SANDBOX_IMAGE: z.string().default("anvita-sandbox:latest"),
   SANDBOX_DOCKER_BIN: z.string().default("docker"),
   SANDBOX_TIMEOUT_MS: z.coerce.number().int().default(120_000),
+  /** Long workflows: a run yields back to the queue after this much work in one go… */
+  WORKFLOW_CHUNK_MS: z.coerce.number().int().min(1000).default(25_000),
+  /** …and fails past these totals (a Worker's trigger step can lower or raise them: maxActiveMinutes, maxDays). */
+  WORKFLOW_MAX_STEPS: z.coerce.number().int().min(10).default(5000),
+  WORKFLOW_MAX_ACTIVE_MINUTES: z.coerce.number().min(1).default(60),
+  WORKFLOW_MAX_DAYS: z.coerce.number().min(1).default(30),
   SANDBOX_MEMORY_MB: z.coerce.number().int().default(1024),
   SANDBOX_CPUS: z.coerce.number().default(1),
   SANDBOX_MAX_CONCURRENCY: z.coerce.number().int().default(4),

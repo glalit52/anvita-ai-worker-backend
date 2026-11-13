@@ -4,6 +4,8 @@ import type { ChatBlock, RunStep } from "../contracts/web.js";
 import { db } from "../db/client.js";
 import { approvals, artifacts, knowledgeBases, messages, runs, threads, workers, workspaces, type WorkerEdge, type WorkerNode } from "../db/schema.js";
 import { enqueue } from "../jobs/queue.js";
+import { config } from "../config.js";
+import { waitTarget } from "./time.js";
 import { assertPublicUrl } from "../lib/net.js";
 import { MessageWriter, queueChannelDelivery, runAgentLoop, setRun, setThreadStatus, type AgentState } from "../runtime/agent.js";
 import { appName, createApproval, executeTool, nextSeq, policyGate, recordStep, resolveConnection, toolContext, type Run } from "../runtime/gateway.js";
@@ -44,7 +46,9 @@ export interface NodeState {
   error?: string;
   /** Edge ids taken from this node (undefined = all outgoing edges). */
   route?: string[];
-  waitingFor?: "approval" | "auth" | "child";
+  waitingFor?: "approval" | "auth" | "child" | "timer";
+  /** Wait step: when to resume (ISO). */
+  wakeAt?: string;
   appId?: string;
   startedAt?: string;
   endedAt?: string;
@@ -72,6 +76,9 @@ export interface WorkflowState {
   output?: unknown;
   blocks?: ChatBlock[];
   depth?: number;
+  /** Totals across chunks: steps executed and active (non-waiting) time. */
+  nodeRuns?: number;
+  activeMs?: number;
 }
 
 export function initialWorkflowState(graph: { nodes: WorkerNode[]; edges: WorkerEdge[] }, depth = 0): WorkflowState {
@@ -79,7 +86,7 @@ export function initialWorkflowState(graph: { nodes: WorkerNode[]; edges: Worker
 }
 
 type Done = { status: "done"; output: unknown; route?: string[]; detail?: string };
-type Waiting = { status: "waiting"; waitingFor: "approval" | "auth" | "child"; detail: string };
+type Waiting = { status: "waiting"; waitingFor: "approval" | "auth" | "child" | "timer"; detail: string };
 type NodeResult = Done | Waiting;
 
 interface Exec {
@@ -95,9 +102,8 @@ interface Exec {
   persist: () => Promise<void>;
 }
 
-const MAX_NODE_RUNS = 400;
 const OUTPUT_LIMIT = 60_000;
-const RESERVED = new Set(["action", "sideEffect", "retries", "input", "idempotent", "onError", "timeout", "autoInput", "requireApproval", "label", "frozen", "language", "file", "code", "instructions", "model", "tools", "kb", "output", "hitl", "rules", "mode", "items", "concurrency", "max", "approvers", "condition", "onTimeout", "channel", "to", "subject", "message", "url", "workerId", "worker", "inputs", "query", "topK", "citations", "outcome", "reason", "summary", "ackMessage", "queue", "sla", "triggerType", "cron", "timezone", "languages", "channels", "preview", "cc", "headers", "kbs", "status", "x", "y"]);
+const RESERVED = new Set(["action", "sideEffect", "retries", "input", "idempotent", "onError", "timeout", "autoInput", "requireApproval", "label", "frozen", "language", "file", "code", "instructions", "model", "tools", "kb", "output", "hitl", "rules", "mode", "items", "concurrency", "max", "approvers", "condition", "onTimeout", "channel", "to", "subject", "message", "url", "workerId", "worker", "inputs", "query", "topK", "citations", "outcome", "reason", "summary", "ackMessage", "queue", "sla", "triggerType", "cron", "timezone", "languages", "channels", "preview", "cc", "headers", "kbs", "status", "x", "y", "duration", "until", "at", "weekdays", "maxActiveMinutes", "maxDays"]);
 
 // ─── Graph helpers ─────────────────────────────────────────────────────────────
 
@@ -241,7 +247,7 @@ async function jsonCall(ex: Exec, label: string, system: string, user: string, t
 
 // ─── Timeline ──────────────────────────────────────────────────────────────────
 
-const STEP_KIND: Record<string, RunStep["kind"]> = { trigger: "plan", agent: "llm", tool: "tool", code: "code", branch: "plan", map: "plan", approval: "approval", call_worker: "tool", send: "tool", handoff: "tool", kb: "kb", end: "plan" };
+const STEP_KIND: Record<string, RunStep["kind"]> = { trigger: "plan", agent: "llm", tool: "tool", code: "code", branch: "plan", map: "plan", approval: "approval", call_worker: "tool", send: "tool", handoff: "tool", kb: "kb", wait: "plan", end: "plan" };
 
 function stepFor(ex: Exec, node: WorkerNode, patch: Partial<RunStep>) {
   const id = `wf:${node.id}`;
@@ -738,7 +744,18 @@ const execEnd: Executor = async (ex, node, _ns, extra) => {
   return { status: "done", output, detail: typeof output === "string" ? output.slice(0, 80) : undefined };
 };
 
-const EXECUTORS: Record<string, Executor> = { trigger: execTrigger, agent: execAgent, tool: execTool, code: execCode, branch: execBranch, map: execMap, approval: execApproval, call_worker: execCallWorker, send: execSend, handoff: execHandoff, kb: execKb, end: execEnd };
+const execWait: Executor = async (ex, node, ns, extra) => {
+  const cfg = node.config ?? {};
+  if (!ns.wakeAt) ns.wakeAt = waitTarget(cfg, cfg.until !== undefined ? renderIn(ex, cfg.until, extra) : undefined).toISOString();
+  const at = Date.parse(ns.wakeAt!);
+  const label = new Date(at).toLocaleString("en-IN", { timeZone: String(cfg.timezone ?? "Asia/Kolkata"), day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  if (Date.now() >= at - 1000) return { status: "done", output: { waitedUntil: ns.wakeAt }, detail: `Resumed (waited until ${label})` };
+  // The queue wakes the run; the dedupe key keeps one wake-up per step however often we re-check.
+  await enqueue("run.advance", { runId: ex.run.id }, { runAt: new Date(at), dedupeKey: `wake:${ex.run.id}:${node.id}:${ns.wakeAt}`, maxAttempts: 5 });
+  return { status: "waiting", waitingFor: "timer", detail: `Waiting until ${label}` };
+};
+
+const EXECUTORS: Record<string, Executor> = { trigger: execTrigger, agent: execAgent, tool: execTool, code: execCode, branch: execBranch, map: execMap, approval: execApproval, call_worker: execCallWorker, send: execSend, handoff: execHandoff, kb: execKb, wait: execWait, end: execEnd };
 
 // ─── Driver ────────────────────────────────────────────────────────────────────
 
@@ -802,18 +819,31 @@ export async function advanceWorkflow(run: Run, log: FastifyBaseLogger) {
   };
   const ex: Exec = { run, state, w, reg: await workspaceRegistry(run.workspaceId, { includeHandoff: customer }), log, worker: worker ?? null, workspaceName: ws?.name ?? "this company", customer, history: await loadHistory(run), persist };
 
+  // Limits: total steps, active time (excluding waits), and calendar time since the run started.
+  const trigger = state.graph.nodes.find((n) => n.kind === "trigger")?.config ?? {};
+  const maxActiveMs = Math.max(1, Number(trigger.maxActiveMinutes) || config.WORKFLOW_MAX_ACTIVE_MINUTES) * 60_000;
+  const maxDays = Math.max(1, Number(trigger.maxDays) || config.WORKFLOW_MAX_DAYS);
+  const started = (run.startedAt ?? new Date()).getTime();
+  const chunkStart = Date.now();
+  let tick = chunkStart;
+  const account = () => {
+    state.activeMs = (state.activeMs ?? 0) + (Date.now() - tick);
+    tick = Date.now();
+  };
+
   try {
+    if (Date.now() - started > maxDays * 86_400_000) return finishWorkflow(ex, "failed", `Time limit reached: the run was still going after ${maxDays} days`);
     const retried = new Set<string>();
-    let executed = 0;
     for (;;) {
       const [cur] = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, run.id));
       if (cur?.status === "cancelled") return finishWorkflow(ex, "cancelled");
       const ready = readyNodes(state, retried);
       if (!ready.length) break;
-      executed += ready.length;
-      if (executed > MAX_NODE_RUNS) return finishWorkflow(ex, "failed", `Step limit (${MAX_NODE_RUNS}) reached`);
+      state.nodeRuns = (state.nodeRuns ?? 0) + ready.length;
+      if (state.nodeRuns > config.WORKFLOW_MAX_STEPS) return finishWorkflow(ex, "failed", `Step limit (${config.WORKFLOW_MAX_STEPS}) reached`);
       for (const n of ready) if (state.nodes[n.id]?.status === "waiting") retried.add(n.id);
       const results = await Promise.all(ready.map((n) => runNode(ex, n)));
+      account();
       await w.flush(true);
       await persist();
       const failedIdx = results.indexOf("failed");
@@ -821,10 +851,16 @@ export async function advanceWorkflow(run: Run, log: FastifyBaseLogger) {
         const n = ready[failedIdx];
         return finishWorkflow(ex, "failed", `${n.title}: ${state.nodes[n.id]?.error ?? "failed"}`);
       }
+      if ((state.activeMs ?? 0) > maxActiveMs) return finishWorkflow(ex, "failed", `Time limit reached: more than ${Math.round(maxActiveMs / 60_000)} minutes of active work`);
+      // Long runs hand back to the queue between chunks so one run can't hold a worker for hours.
+      if (Date.now() - chunkStart > config.WORKFLOW_CHUNK_MS && readyNodes(structuredClone(state), new Set(retried)).length) {
+        await enqueue("run.advance", { runId: run.id }, { maxAttempts: 3 });
+        return;
+      }
     }
     const waiting = Object.values(state.nodes).filter((s) => s.status === "waiting");
     if (waiting.length) {
-      const status = waiting.some((s) => s.waitingFor === "approval") ? "waiting_approval" : waiting.some((s) => s.waitingFor === "auth") ? "waiting_auth" : "running";
+      const status = waiting.some((s) => s.waitingFor === "approval") ? "waiting_approval" : waiting.some((s) => s.waitingFor === "auth") ? "waiting_auth" : "waiting";
       return parkWorkflow(ex, status);
     }
     return finishWorkflow(ex, "succeeded");
@@ -835,12 +871,12 @@ export async function advanceWorkflow(run: Run, log: FastifyBaseLogger) {
   }
 }
 
-async function parkWorkflow(ex: Exec, status: "waiting_approval" | "waiting_auth" | "running") {
+async function parkWorkflow(ex: Exec, status: "waiting_approval" | "waiting_auth" | "waiting") {
   await ex.w.flush(true, true);
   ex.w.dispose();
   await setRun(ex.run.id, { status, state: { ...ex.state, blocks: ex.run.assistantMessageId ? undefined : ex.w.blocks } as unknown as Record<string, unknown> });
-  await setThreadStatus(ex.run, status === "running" ? "running" : "waiting");
-  if (status !== "running") await queueChannelDelivery(ex.run);
+  await setThreadStatus(ex.run, "waiting");
+  if (status !== "waiting") await queueChannelDelivery(ex.run);
 }
 
 async function finishWorkflow(ex: Exec, status: "succeeded" | "failed" | "cancelled", error?: string) {

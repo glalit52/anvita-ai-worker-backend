@@ -140,7 +140,7 @@ export const chatRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.delete("/threads/:id", { preHandler: app.authorize("chat:write"), schema: { tags, params: idParam } }, async (req, reply) => {
     const a = auth(req);
-    await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.threadId, req.params.id), eq(runs.workspaceId, a.workspaceId), inArray(runs.status, ["queued", "running", "waiting_approval", "waiting_auth"])));
+    await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.threadId, req.params.id), eq(runs.workspaceId, a.workspaceId), inArray(runs.status, ["queued", "running", "waiting", "waiting_approval", "waiting_auth"])));
     const [t] = await db.delete(threads).where(and(eq(threads.id, req.params.id), eq(threads.workspaceId, a.workspaceId))).returning({ id: threads.id });
     assertFound(t, "Thread");
     await publish({ workspaceId: a.workspaceId, threadId: t.id, type: "thread.deleted", data: { id: t.id } });
@@ -193,10 +193,10 @@ export const chatRoutes: FastifyPluginAsyncZod = async (app) => {
 
   app.post("/runs/:id/cancel", { preHandler: app.authorize("chat:write"), schema: { tags: ["runs"], params: idParam } }, async (req) => {
     const a = auth(req);
-    const [r] = await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.id, req.params.id), eq(runs.workspaceId, a.workspaceId), inArray(runs.status, ["queued", "running", "waiting_approval", "waiting_auth"]))).returning();
+    const [r] = await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.id, req.params.id), eq(runs.workspaceId, a.workspaceId), inArray(runs.status, ["queued", "running", "waiting", "waiting_approval", "waiting_auth"]))).returning();
     if (!r) throw badRequest("Run is not active");
     // Workers called by this run stop too.
-    await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.parentRunId, r.id), inArray(runs.status, ["queued", "running", "waiting_approval", "waiting_auth"])));
+    await db.update(runs).set({ status: "cancelled", endedAt: new Date() }).where(and(eq(runs.parentRunId, r.id), inArray(runs.status, ["queued", "running", "waiting", "waiting_approval", "waiting_auth"])));
     if (r.threadId) {
       const [t] = await db.update(threads).set({ status: "done" }).where(eq(threads.id, r.threadId)).returning();
       if (r.assistantMessageId) {

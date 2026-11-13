@@ -17,6 +17,7 @@ export default defineConfig({
       STRIPE_WEBHOOK_SECRET: "whsec_stripe",
       WEB_URL: "http://web.test",
       VOICE_WAIT_MS: "0",
+      WORKFLOW_CHUNK_MS: "1000",
     },
     // Tests share one database; run files sequentially.
     fileParallelism: false,

@@ -248,7 +248,8 @@ export const messages = pgTable("messages", {
   createdAt: createdAt(),
 }, (t) => [index("messages_thread_idx").on(t.threadId, t.createdAt)]);
 
-export type RunStatus = "queued" | "running" | "waiting_approval" | "waiting_auth" | "succeeded" | "failed" | "cancelled";
+/** "waiting": parked on a timer (Wait step) or a called Worker. */
+export type RunStatus = "queued" | "running" | "waiting" | "waiting_approval" | "waiting_auth" | "succeeded" | "failed" | "cancelled";
 
 export const runs = pgTable("runs", {
   id: text("id").primaryKey(),

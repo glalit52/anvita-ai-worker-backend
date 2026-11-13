@@ -1,3 +1,4 @@
+import { MAX_WAIT_MS, parseWaitDuration } from "./time.js";
 import type { WorkerEdge, WorkerNode } from "../db/schema.js";
 import type { Registry } from "../runtime/tools/registry.js";
 import { checkExpr, ExprError, templateExprs } from "./expr.js";
@@ -9,7 +10,7 @@ export interface Issue {
   message: string;
 }
 
-const KINDS = new Set(["trigger", "agent", "tool", "code", "branch", "map", "approval", "call_worker", "send", "handoff", "kb", "end"]);
+const KINDS = new Set(["trigger", "agent", "tool", "code", "branch", "map", "approval", "call_worker", "send", "handoff", "kb", "wait", "end"]);
 const CHANNELS = new Set(["reply", "same channel", "slack", "whatsapp", "gmail", "outlook", "teams", "webhook"]);
 
 /**
@@ -86,6 +87,16 @@ export function validateWorkflow(graph: { nodes: WorkerNode[]; edges: WorkerEdge
     for (const [k, v] of Object.entries(cfg)) if (!["code", "rules", "condition", "instructions"].includes(k)) exprCheck(v, k === "message" ? "Message" : k);
 
     switch (n.kind) {
+      case "wait": {
+        const has = (k: string) => cfg[k] !== undefined && cfg[k] !== "";
+        if (!has("duration") && !has("until") && !has("at")) err(n.id, `Set how long “${n.title}” waits: a duration (2h), a date, or a time of day`);
+        else if (has("duration")) {
+          const ms = parseWaitDuration(cfg.duration);
+          if (ms === null) err(n.id, `"${String(cfg.duration)}" isn't a duration — try 30m, 2h or 3 days`);
+          else if (ms > MAX_WAIT_MS) err(n.id, "Waits are limited to 90 days");
+        } else if (has("at") && !/^\d{1,2}:\d{2}$/.test(String(cfg.at))) err(n.id, `"${String(cfg.at)}" isn't a time of day — use HH:MM`);
+        break;
+      }
       case "agent": {
         if (cfg.output !== undefined && cfg.output !== "" && !parseOutputSpec(cfg.output)) err(n.id, "Output schema should be a JSON object template or a list of field names");
         if (!cfg.instructions && !n.subtitle) warn(n.id, `Give “${n.title}” instructions so the AI knows what to do`);
